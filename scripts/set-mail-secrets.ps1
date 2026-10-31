@@ -4,7 +4,7 @@
 # the values go straight into the project's function secrets (use `npx supabase login` first).
 param(
   [string]$Ref = 'lrrnvjurlesmphpcfyft',
-  [string]$SiteUrl = 'https://moreyash007.github.io/Sudu-Attendance'
+  [string]$SiteUrl = 'https://suduattendance.vercel.app'
 )
 $ErrorActionPreference = 'Stop'
 

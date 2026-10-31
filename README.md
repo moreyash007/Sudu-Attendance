@@ -4,15 +4,18 @@ Office attendance website for SUDU Logistics. Works on any phone or laptop brows
 
 ```
 attendance/
-  frontend/public/   the website (HTML/CSS/JS), hosted free on GitHub Pages
+  frontend/public/   the website (HTML/CSS/JS), hosted on Vercel
   supabase/          the backend, hosted on Supabase
     migrations/        database tables + security rules + private photo bucket (SQL)
-    functions/api/     the Edge Function: all the rules (10 m check, device lock, approvals...)
+    functions/api/     the Edge Function: all the rules (10 m check, device lock, approvals, leave email...)
     tests/e2e.mjs      automatic end-to-end tests
-  .github/workflows/ GitHub Actions: run the tests, publish the site
+  vercel.json        tells Vercel to serve frontend/public
+  .github/workflows/ GitHub Actions: run the tests (pages.yml is an optional GitHub Pages publish, not needed)
 ```
 
-How it fits together: the browser (GitHub Pages) talks to **Supabase** for login, the database and photos, and to
+**Live site: https://suduattendance.vercel.app/** (admin: https://suduattendance.vercel.app/admin/)
+
+How it fits together: the browser (Vercel) talks to **Supabase** for login, the database and photos, and to
 the `api` **Edge Function** for anything that must be checked on the server.
 
 ## What it does
@@ -62,9 +65,13 @@ Your Supabase project: `https://lrrnvjurlesmphpcfyft.supabase.co` (already set i
    `insert into public.profiles (id, username, name, emp_id, role) select id, 'yourname', 'Admin', 'ADMIN', 'admin' from auth.users where email = 'yourname@attendance.invalid';`)
    If Supabase refuses the `@attendance.invalid` address, use another domain: pass `-Domain other.example` to the
    script and set the same domain in `frontend/public/config.js` (`EMAIL_DOMAIN`) and as the `EMAIL_DOMAIN` function secret.
-5. **Publish the site.** GitHub repo > Settings > Pages > Source: **GitHub Actions**. Every push to `main` then
-   publishes `frontend/public`. The site is at `https://moreyash007.github.io/Sudu-Attendance/`
-   (admin: `/admin/`).
+5. **Publish the site (Vercel).** vercel.com > Add New > Project > import this GitHub repository. Leave the build
+   settings empty: `vercel.json` already points Vercel at `frontend/public`. Every push to `main` then redeploys
+   automatically. The site is at `https://suduattendance.vercel.app/` (admin: `/admin/`).
+   If a page shows `NOT_FOUND`, open the project in Vercel > Deployments and check the latest one is "Ready" and was
+   built from the newest commit; Settings > General > Root Directory should be empty (or `frontend/public`).
+   (Optional alternative: GitHub Pages. Set Settings > Pages > Source to **GitHub Actions**. Do not leave Source on
+   "Deploy from a branch": GitHub then publishes the README over the site. Not needed if you use Vercel.)
 6. Open `/admin/`, sign in with your username and password, scan the QR code with Google/Microsoft Authenticator,
    enter the code. From then on every admin sign-in asks for a code. Add employees under Employees.
 
@@ -118,5 +125,6 @@ leave, approvals, delete. GitHub Actions runs them on every push.
 - Supabase's built-in rate limits protect sign-in; there is no custom "lock after 5 wrong passwords".
 - Late/absent alerts show on the admin dashboard only (no email/SMS). Server messages are English only.
 - The map and chart libraries load from public CDNs (jsdelivr, cdnjs, OpenStreetMap).
-- The repository contains the default office location (18.646972, 73.784528) and the company logo. Keep the
-  repository private if you do not want that public (GitHub Pages from a private repo needs a paid GitHub plan).
+- The repository is public and contains the default office location (18.646972, 73.784528) and the company logo.
+  Never commit passwords, the Supabase secret / service_role key, the Resend key or the admin's email address; those
+  live only in Supabase's function secrets.

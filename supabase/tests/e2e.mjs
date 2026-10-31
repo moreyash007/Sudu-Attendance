@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 const { API_URL, ANON_KEY, SERVICE_ROLE_KEY } = process.env;
 const DOMAIN = 'attendance.invalid';
 const LOCAL = 'http://localhost:8090';           // origin of a developer's PC: local test mode may apply
-const PAGES = 'https://moreyash007.github.io';  // origin of the real site: the location rule must apply
+const PAGES = 'https://suduattendance.vercel.app'; // origin of the real site: the location rule must apply
 const OFFICE = { lat: 18.646972, lng: 73.784528 };
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(1600, 7)]);
 const RUN = Math.random().toString(36).slice(2, 7); // every run uses its own usernames, so it can be repeated

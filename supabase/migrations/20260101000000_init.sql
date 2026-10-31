@@ -126,12 +126,14 @@ on conflict (id) do update set public = false, file_size_limit = 2097152, allowe
 drop policy if exists photos_employee_upload on storage.objects;
 drop policy if exists photos_admin_read      on storage.objects;
 
--- An employee can upload only into their own selfies/<their id>/ folder, and can never read photos back.
+-- An active employee can upload only into their own selfies/<their id>/ folder, and can never read photos back.
+-- (Someone who merely signed up without an employee profile cannot upload anything.)
 create policy photos_employee_upload on storage.objects for insert to authenticated
   with check (
     bucket_id = 'photos'
     and (storage.foldername(name))[1] = 'selfies'
     and (storage.foldername(name))[2] = auth.uid()::text
+    and exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'employee' and p.active)
   );
 
 -- Only an admin (with the authenticator step) can view photos.

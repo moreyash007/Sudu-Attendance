@@ -123,6 +123,10 @@ async function selfie(token, uid) {
   check('employee cannot read photos back', (await download(E1, prof1.enrol_photo)).status >= 400);
   check('employee cannot upload into someone else’s folder', (await upload(E1, `selfies/${emp2}/x.jpg`, JPEG)).status >= 400);
   check('employee cannot upload a non-JPEG file', (await upload(E1, `selfies/${emp1}/x.png`, Buffer.from('not an image'), 'text/plain')).status >= 400);
+  const stray = await admin('POST', '/auth/v1/admin/users', { email: `stray${RUN}@${DOMAIN}`, password: 'Stray-Pass-123', email_confirm: true });
+  const strayTok = (await login('stray' + RUN, 'Stray-Pass-123')).data.access_token;
+  check('a login without an employee profile cannot upload anything', (await upload(strayTok, `selfies/${stray.data.id}/x.jpg`, JPEG)).status >= 400);
+  await admin('DELETE', `/auth/v1/admin/users/${stray.data.id}`);
   check('employee cannot sneak a file into the enroll folder', (await upload(E1, `enroll/${emp1}/me.jpg`, JPEG)).status >= 400);
 
   // ---------- check-in / check-out in LOCAL TEST mode (origin = localhost) ----------

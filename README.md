@@ -52,15 +52,16 @@ Your Supabase project: `https://lrrnvjurlesmphpcfyft.supabase.co` (already set i
    ```
    Do **not** set `ALLOW_LOCAL_TEST` on the hosted project. (Optional: `npx supabase secrets set EMAIL_DOMAIN=attendance.invalid`,
    which is already the default.)
-4. **Create the first admin.** Authentication > Users > Add user > Create new user:
-   email `yourname@attendance.invalid`, a strong password (12+ characters), tick **Auto Confirm User**.
-   Then SQL Editor, replacing `yourname`:
-   ```sql
-   insert into public.profiles (id, username, name, emp_id, role)
-   select id, 'yourname', 'Admin', 'ADMIN', 'admin' from auth.users where email = 'yourname@attendance.invalid';
+4. **Create the first admin.** In PowerShell, from this folder (you must be logged in with `npx supabase login`):
    ```
-   If the dashboard refuses the `@attendance.invalid` address, use another domain and set the same domain in
-   `frontend/public/config.js` (`EMAIL_DOMAIN`) and as the `EMAIL_DOMAIN` function secret.
+   powershell -File scriptscreate-admin.ps1
+   ```
+   It asks for a username and a password (12+ characters, hidden) and creates the admin. The password is never
+   printed or saved. (Manual alternative: Dashboard > Authentication > Users > Add user with email
+   `yourname@attendance.invalid` and Auto Confirm, then in the SQL Editor:
+   `insert into public.profiles (id, username, name, emp_id, role) select id, 'yourname', 'Admin', 'ADMIN', 'admin' from auth.users where email = 'yourname@attendance.invalid';`)
+   If Supabase refuses the `@attendance.invalid` address, use another domain: pass `-Domain other.example` to the
+   script and set the same domain in `frontend/public/config.js` (`EMAIL_DOMAIN`) and as the `EMAIL_DOMAIN` function secret.
 5. **Publish the site.** GitHub repo > Settings > Pages > Source: **GitHub Actions**. Every push to `main` then
    publishes `frontend/public`. The site is at `https://moreyash007.github.io/Sudu-Attendance/`
    (admin: `/admin/`).
@@ -88,7 +89,7 @@ npx supabase start
 npx supabase status -o env      # shows API_URL, ANON_KEY, SERVICE_ROLE_KEY
 API_URL=... ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 ```
-84 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
+85 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
 leave, approvals, delete. GitHub Actions runs them on every push.
 
 ## Known limits

@@ -21,8 +21,12 @@ if ($pw1 -ne $pw2) { Write-Host 'Passwords do not match.'; exit 1 }
 if ($pw1.Length -lt 12) { Write-Host 'Password must be at least 12 characters.'; exit 1 }
 
 Write-Host 'Getting the project key from the Supabase CLI...'
-$keys = (npx --yes supabase@latest projects api-keys --project-ref $Ref -o json 2>$null | Out-String) | ConvertFrom-Json
-$svc = ($keys | Where-Object { $_.name -eq 'service_role' } | Select-Object -First 1).api_key
+# npx prints harmless "npm notice" lines on stderr; Windows PowerShell would treat those as errors, so relax it here.
+$ErrorActionPreference = 'Continue'
+$raw = npx --yes supabase@latest projects api-keys --project-ref $Ref -o json 2>$null | Out-String
+$ErrorActionPreference = 'Stop'
+$svc = $null
+try { $svc = (($raw | ConvertFrom-Json) | Where-Object { $_.name -eq 'service_role' } | Select-Object -First 1).api_key } catch {}
 if (-not $svc) { Write-Host 'Could not get the key. Run "npx supabase login" with the account that owns the project, then try again.'; exit 1 }
 
 $url = "https://$Ref.supabase.co"

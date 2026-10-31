@@ -38,3 +38,8 @@ enabled = true
 [edge_runtime.secrets]
 ALLOW_LOCAL_TEST = "true"
 EMAIL_DOMAIN = "attendance.invalid"
+# Fake mail server used by supabase/tests/e2e.mjs (host.docker.internal = your PC from inside Docker).
+RESEND_API_URL = "http://host.docker.internal:55999/emails"
+RESEND_API_KEY = "test-key"
+NOTIFY_EMAIL = "admin@mail.test"
+SITE_URL = "https://example.test/app"

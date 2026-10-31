@@ -11,6 +11,15 @@ const OFFICE = { lat: 18.646972, lng: 73.784528 };
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(1600, 7)]);
 const RUN = Math.random().toString(36).slice(2, 7); // every run uses its own usernames, so it can be repeated
 const UA = 'adm' + RUN, U1 = 'e1' + RUN, U2 = 'e2' + RUN;
+import nodeHttp from 'node:http';
+// A fake Resend server: the local Edge Function is configured (supabase/config.toml) to post its emails here.
+const mails = [];
+const MAIL_PORT = Number(process.env.MAIL_PORT || 55999);
+nodeHttp.createServer((req, res) => {
+  let data = '';
+  req.on('data', (d) => (data += d));
+  req.on('end', () => { try { mails.push({ auth: req.headers.authorization, body: JSON.parse(data) }); } catch { /* ignore */ } res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"id":"test"}'); });
+}).listen(MAIL_PORT, '0.0.0.0');
 const results = [];
 const check = (name, ok, extra = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  <- ' + extra}`); };
 const short = (v) => JSON.stringify(v)?.slice(0, 160);
@@ -174,13 +183,29 @@ async function selfie(token, uid) {
   check('admin approves the visit', (await fn(A, 'admin-review', { table: 'visits', id: pv[0].id, status: 'approved' })).status === 200);
 
   // ---------- leave ----------
-  const leave = (token, uid, o) => rest(token, 'POST', 'leaves', { user_id: uid, reason: 'Family', ...o });
-  check('half-day over several dates is refused by the database', (await leave(E2, emp2, { type: 'half_first', from_date: '2026-11-03', to_date: '2026-11-04' })).status >= 400);
-  check('end before start is refused', (await leave(E2, emp2, { type: 'full', from_date: '2026-11-05', to_date: '2026-11-04' })).status >= 400);
-  check('cannot file leave for someone else', (await leave(E2, emp1, { type: 'full', from_date: '2026-11-03', to_date: '2026-11-03' })).status >= 400);
-  check('cannot file an already-approved leave', (await leave(E2, emp2, { type: 'full', from_date: '2026-11-03', to_date: '2026-11-03', status: 'approved' })).status >= 400);
-  check('full-day leave accepted', (await leave(E2, emp2, { type: 'full', from_date: '2026-11-03', to_date: '2026-11-04' })).status === 201);
-  check('half-day leave accepted', (await leave(E2, emp2, { type: 'half_second', from_date: '2026-11-06', to_date: '2026-11-06' })).status === 201);
+  const leave = (token, o) => fn(token, 'leave', { reason: 'Family', ...o }, PAGES);
+  check('half-day over several dates is refused', (await leave(E2, { type: 'half_first', from: '2026-11-03', to: '2026-11-04' })).status === 400);
+  check('end before start is refused', (await leave(E2, { type: 'full', from: '2026-11-05', to: '2026-11-04' })).status === 400);
+  check('bad leave type is refused', (await leave(E2, { type: 'holiday', from: '2026-11-05', to: '2026-11-05' })).status === 400);
+  check('leave without a reason is refused', (await leave(E2, { type: 'full', from: '2026-11-05', to: '2026-11-05', reason: ' ' })).status === 400);
+  check('employees can no longer write leave directly (it must go through the function)', (await rest(E2, 'POST', 'leaves', { user_id: emp2, type: 'full', from_date: '2026-11-03', to_date: '2026-11-03', reason: 'x' })).status >= 400);
+  check('an admin cannot file leave through the employee route', (await leave(A, { type: 'full', from: '2026-11-03', to: '2026-11-03' })).status === 403);
+  const mailsBefore = mails.length;
+  r = await leave(E2, { type: 'full', from: '2026-11-03', to: '2026-11-04', reason: 'Family function <b>& travel</b>' });
+  check('full-day leave accepted', r.status === 200 && r.data.ok === true, short(r.data));
+  if (process.env.REQUIRE_MAIL) {
+    for (let i = 0; i < 20 && mails.length === mailsBefore; i++) await new Promise((r2) => setTimeout(r2, 250));
+    const m = mails[mails.length - 1];
+    check('the admin is emailed about the leave request', r.data.emailed === true && mails.length === mailsBefore + 1, short(r.data));
+    check('email has the right recipient, key, subject and details', m && m.auth === 'Bearer test-key' && m.body.to.includes('admin@mail.test') &&
+      /Leave request: Test .* \(Full day, 2026-11-03 to 2026-11-04\)/.test(m.body.subject) &&
+      m.body.text.includes('Family function <b>& travel</b>') && m.body.text.includes('https://example.test/app/admin/'), short(m));
+    check('email HTML escapes what the employee typed', m && !m.body.html.includes('<b>& travel') && m.body.html.includes('&lt;b&gt;&amp; travel&lt;/b&gt;'));
+  } else {
+    check('the leave request is saved even when no mail server is reachable', r.status === 200);
+  }
+  r = await leave(E2, { type: 'half_second', from: '2026-11-06', to: '2026-11-06', reason: 'Bank' });
+  check('half-day leave accepted', r.status === 200, short(r.data));
   check('employee cannot approve their own leave', (await rest(E2, 'PATCH', 'leaves?status=eq.pending', { status: 'approved' })).status >= 400 && (await rest(A, 'GET', `leaves?status=eq.approved&user_id=eq.${emp2}&select=id`)).data.length === 0);
   const pl = (await rest(A, 'GET', `leaves?status=eq.pending&user_id=eq.${emp2}&select=id`)).data;
   check('admin sees 2 pending leaves', pl.length === 2);

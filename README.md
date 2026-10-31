@@ -68,6 +68,24 @@ Your Supabase project: `https://lrrnvjurlesmphpcfyft.supabase.co` (already set i
 6. Open `/admin/`, sign in with your username and password, scan the QR code with Google/Microsoft Authenticator,
    enter the code. From then on every admin sign-in asks for a code. Add employees under Employees.
 
+### Email the admin when an employee applies for leave
+
+Leave requests go through the `api` function, which saves them and sends an email with [Resend](https://resend.com).
+The admin's address and the Resend key are **private function secrets**, never stored in this repository.
+
+1. Sign up at resend.com (free) and create an **API key** (API Keys > Create). With no domain of your own, Resend
+   can only deliver to the email you signed up with, so use that address as the admin's.
+2. In PowerShell (logged in with `npx supabase login`):
+   ```
+   powershell -File "C:\Users\yashr\Desktop\helpdesk\SUDU\attendance\scripts\set-mail-secrets.ps1"
+   ```
+   It asks for the admin email (several can be separated with commas) and the key (hidden).
+3. Apply for leave as an employee and check the inbox (and spam). If the email fails or is not set up, the
+   leave request is still saved and shows in Admin > Approvals.
+
+To send from your own address, verify a domain in Resend and add a `NOTIFY_FROM` secret such as
+`SUDU Attendance <attendance@yourdomain.com>` (`npx supabase secrets set NOTIFY_FROM=...`).
+
 Never put the Supabase **secret / service_role** key in the website or in Git. Only the publishable key is in
 `config.js`; it is designed to be public.
 
@@ -89,7 +107,7 @@ npx supabase start
 npx supabase status -o env      # shows API_URL, ANON_KEY, SERVICE_ROLE_KEY
 API_URL=... ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 ```
-85 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
+90 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
 leave, approvals, delete. GitHub Actions runs them on every push.
 
 ## Known limits

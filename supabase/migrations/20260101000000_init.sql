@@ -105,17 +105,12 @@ create policy visits_read     on public.visits     for select to authenticated u
 create policy leaves_read     on public.leaves     for select to authenticated using (user_id = auth.uid() or public.is_admin());
 create policy settings_read   on public.settings   for select to authenticated using (true);
 
--- Employees may file their own leave request; approving/rejecting goes through the Edge Function.
-create policy leaves_insert on public.leaves for insert to authenticated
-  with check (
-    user_id = auth.uid()
-    and status = 'pending'
-    and exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'employee' and p.active)
-  );
+-- Leave requests are filed through the Edge Function (it saves them and emails the admin), so there is no
+-- insert policy any more; approving/rejecting also goes through the function.
 
--- Signed-in users can only read/insert through the policies above; nobody can update or delete from the browser.
+-- Signed-in users can only read through the policies above; nobody can insert, update or delete from the browser.
 revoke update, delete, truncate on public.profiles, public.attendance, public.visits, public.leaves, public.settings from authenticated;
-revoke insert on public.profiles, public.attendance, public.visits, public.settings from authenticated;
+revoke insert on public.profiles, public.attendance, public.visits, public.leaves, public.settings from authenticated;
 
 -- ---------- private photo bucket ----------
 

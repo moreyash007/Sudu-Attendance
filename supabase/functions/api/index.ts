@@ -2,7 +2,7 @@
 // authenticator-app step (aal2). Employees cannot write attendance any other way (see the SQL security rules).
 //
 // Routes (POST /functions/v1/api/<route>):
-//   employee: config, check-in, check-out, visit
+//   employee: config, check-in, check-out, visit, leave
 //   admin:    admin-create-user, admin-update-user, admin-delete-user, admin-review, admin-settings
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -191,6 +191,58 @@ async function visit(c: Ctx) {
   return { ok: true };
 }
 
+// ---------- leave (saved here so the admin can be emailed) ----------
+
+const LEAVE_LABEL: Record<string, string> = { full: 'Full day', half_first: 'Half day (first half)', half_second: 'Half day (second half)' };
+const isDate = (s: unknown) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+const oneLine = (s: string) => s.replace(/[\r\n\t]+/g, ' ').trim();
+
+// Emails the admin through Resend. The addresses and the key are function secrets (never in the repository):
+//   RESEND_API_KEY, NOTIFY_EMAIL (one or more, comma separated), optional NOTIFY_FROM, SITE_URL.
+// A failed or unconfigured email never blocks the leave request itself.
+async function emailAdmin(subject: string, lines: string[]): Promise<boolean> {
+  const key = Deno.env.get('RESEND_API_KEY');
+  const to = (Deno.env.get('NOTIFY_EMAIL') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!key || !to.length) return false;
+  const site = (Deno.env.get('SITE_URL') ?? '').replace(/\/$/, '');
+  const text = lines.join('\n') + (site ? `\n\nReview it: ${site}/admin/` : '');
+  const html = '<p>' + lines.map(esc).join('<br>') + '</p>' + (site ? `<p><a href="${esc(site)}/admin/">Open the admin panel</a></p>` : '');
+  try {
+    const res = await fetch(Deno.env.get('RESEND_API_URL') ?? 'https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: Deno.env.get('NOTIFY_FROM') ?? 'SUDU Attendance <onboarding@resend.dev>', to, subject, text, html }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) console.error('email failed', res.status, (await res.text()).slice(0, 200));
+    return res.ok;
+  } catch (e) { console.error('email error', e); return false; }
+}
+
+async function leave(c: Ctx) {
+  requireEmployee(c.auth);
+  const b = c.body;
+  const reason = String(b.reason ?? '').trim().slice(0, 500);
+  if (!Object.keys(LEAVE_LABEL).includes(b.type) || !isDate(b.from) || !isDate(b.to) || b.to < b.from || !reason) {
+    fail(400, 'Pick valid dates and enter a reason.');
+  }
+  if (b.type !== 'full' && b.from !== b.to) fail(400, 'A half-day leave is for a single date.');
+  const { error } = await db.from('leaves').insert({
+    user_id: c.auth.userId, type: b.type, from_date: b.from, to_date: b.to, reason,
+  });
+  if (error) throw error;
+  const p = c.auth.profile;
+  const dates = b.from === b.to ? b.from : `${b.from} to ${b.to}`;
+  const emailed = await emailAdmin(`Leave request: ${oneLine(p.name)} (${LEAVE_LABEL[b.type]}, ${dates})`, [
+    `${p.name} (${p.emp_id || p.username}) has applied for leave.`,
+    `Type: ${LEAVE_LABEL[b.type]}`,
+    `Dates: ${dates}`,
+    `Reason: ${reason}`,
+  ]);
+  return { ok: true, emailed };
+}
+
 // ---------- admin routes ----------
 
 async function removeFolder(folder: string) {
@@ -309,6 +361,7 @@ const ROUTES: Record<string, (c: Ctx) => Promise<unknown>> = {
   'check-in': checkIn,
   'check-out': checkOut,
   'visit': visit,
+  'leave': leave,
   'admin-create-user': adminCreateUser,
   'admin-update-user': adminUpdateUser,
   'admin-delete-user': adminDeleteUser,

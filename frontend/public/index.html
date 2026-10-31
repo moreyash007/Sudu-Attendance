@@ -359,9 +359,11 @@ $('lSend').onclick = async () => {
   const type = $('lType').value, from = $('lFrom').value, reason = $('lReason').value.trim();
   const to = type === 'full' ? $('lTo').value : from;
   if (!from || !to || to < from || !reason) return toast(t('badDates'));
-  const { error } = await sb.from('leaves').insert({ user_id: me.id, type, from_date: from, to_date: to, reason });
-  if (error) return toast(error.message);
-  $('lReason').value = ''; toast(t('leaveSent')); await refresh();
+  setBusy(true);
+  try {
+    await call('leave', { type, from, to, reason }); // the server saves it and emails the admin
+    $('lReason').value = ''; toast(t('leaveSent')); await refresh();
+  } catch (e) { toast(e.message); } finally { setBusy(false); }
 };
 
 $('tabs').onclick = (e) => {

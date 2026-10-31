@@ -54,7 +54,7 @@ Your Supabase project: `https://lrrnvjurlesmphpcfyft.supabase.co` (already set i
    which is already the default.)
 4. **Create the first admin.** In PowerShell, from this folder (you must be logged in with `npx supabase login`):
    ```
-   powershell -File scriptscreate-admin.ps1
+   powershell -File scripts\create-admin.ps1
    ```
    It asks for a username and a password (12+ characters, hidden) and creates the admin. The password is never
    printed or saved. (Manual alternative: Dashboard > Authentication > Users > Add user with email

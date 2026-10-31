@@ -43,12 +43,14 @@
       <button data-tab="dash" class="active">Dashboard</button>
       <button data-tab="approvals">Approvals</button>
       <button data-tab="employees">Employees</button>
+      <button data-tab="holidays">Holidays</button>
       <button data-tab="reports">Reports</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <section id="dash"></section>
     <section id="approvals" class="hidden"></section>
     <section id="employees" class="hidden"></section>
+    <section id="holidays" class="hidden"></section>
     <section id="reports" class="card hidden"></section>
     <section id="settings" class="card hidden"></section>
   </main>
@@ -139,7 +141,7 @@ $('logout').onclick = async () => { await sb.auth.signOut(); location.reload(); 
 $('tabs').onclick = (e) => {
   const tab = e.target.dataset.tab; if (!tab) return;
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b === e.target));
-  ['dash', 'approvals', 'employees', 'reports', 'settings'].forEach((t) => $(t).classList.toggle('hidden', t !== tab));
+  ['dash', 'approvals', 'employees', 'holidays', 'reports', 'settings'].forEach((t) => $(t).classList.toggle('hidden', t !== tab));
 };
 
 const table = (headers, rows) =>
@@ -170,25 +172,37 @@ document.addEventListener('click', async (e) => {
     else if (act === 'resetDevice') await call('admin-update-user', { id, resetDevice: true });
     else if (act === 'active') await call('admin-update-user', { id, active: to === 'true' });
     else if (act === 'reface') await reenrol(id);
+    else if (act === 'holRename') {
+      const next = prompt('New name for this holiday', name);
+      if (!next || !next.trim()) return;
+      await call('admin-holiday-update', { id, name: next.trim() });
+    } else if (act === 'holDelete') {
+      if (!confirm(`Remove the holiday "${name}" (${b.dataset.date})?\n\nThat day then counts as a normal working day again.`)) return;
+      await call('admin-holiday-delete', { id });
+    }
     await loadAll();
   } catch (err) { alert(err.message); }
 });
 
 // ---------- data ----------
-const S = { cfg: { startTime: '09:30', graceMin: 15 }, users: [], att: [], leaves: [], visits: [], pendingVisits: [], pendingLeaves: [] };
+const S = {
+  cfg: { startTime: '09:30', graceMin: 15 }, users: [], att: [], leaves: [], visits: [], pendingVisits: [], pendingLeaves: [],
+  rules: { sunday: true, saturdays: [2] }, upcoming: [], festivals: [], holidayToday: null,
+};
 let barChart = null, pieChart = null;
 
 async function q(promise) { const { data, error } = await promise; if (error) throw new Error(error.message); return data; }
 const withProfile = (table) => sb.from(table).select('*, profile:profiles(name, emp_id)');
 const who = (r) => ({ uid: r.user_id, name: r.profile && r.profile.name, empId: r.profile && r.profile.emp_id });
-const nAtt = (r) => ({ ...who(r), id: r.id, date: r.date, late: r.late, test: r.test, inTime: r.in_time, outTime: r.out_time, inLoc: { distance: r.in_dist }, inSelfie: r.in_photo, outSelfie: r.out_photo });
+const nAtt = (r) => ({ ...who(r), id: r.id, date: r.date, late: r.late, test: r.test, holiday: r.holiday_name, inTime: r.in_time, outTime: r.out_time, inLoc: { distance: r.in_dist }, inSelfie: r.in_photo, outSelfie: r.out_photo });
 const nVisit = (r) => ({ ...who(r), id: r.id, date: r.date, type: r.type, customer: r.customer, reason: r.reason, time: r.time, loc: { lat: r.lat, lng: r.lng }, selfie: r.photo, status: r.status });
 const nLeave = (r) => ({ ...who(r), id: r.id, type: r.type, from: r.from_date, to: r.to_date, reason: r.reason, status: r.status });
 const nUser = (r) => ({ id: r.id, name: r.name, empId: r.emp_id, username: r.username, role: r.role, active: r.active, deviceBound: !!r.device_id, photo: r.enrol_photo, isAdmin: r.role === 'admin' });
 
 async function loadAll() {
   const today = istDate(), since = istDate(new Date(Date.now() - 13 * 86400000));
-  const [cfg, users, att, leaves, visits, pv, pl] = await Promise.all([
+  const horizon = istDate(new Date(Date.now() + 150 * 86400000));
+  const [cfg, users, att, leaves, visits, pv, pl, rulesRow, festivals, upcoming] = await Promise.all([
     q(sb.from('settings').select('value').eq('key', 'office').maybeSingle()),
     q(sb.from('profiles').select('*').order('role').order('name')),
     q(withProfile('attendance').gte('date', since).lte('date', today).order('date')),
@@ -196,13 +210,19 @@ async function loadAll() {
     q(withProfile('visits').eq('date', today)),
     q(withProfile('visits').eq('status', 'pending').order('time', { ascending: false })),
     q(withProfile('leaves').eq('status', 'pending').order('created_at', { ascending: false })),
+    q(sb.from('settings').select('value').eq('key', 'holiday_rules').maybeSingle()),
+    q(sb.from('holidays').select('*').order('date')),
+    call('holidays', { from: today, to: horizon }).catch(() => ({ holidays: [] })),
   ]);
+  const todayHoliday = (upcoming.holidays || []).find((h) => h.date === today);
   Object.assign(S, {
+    rules: { sunday: true, saturdays: [2], ...((rulesRow && rulesRow.value) || {}) },
+    festivals: festivals, upcoming: upcoming.holidays || [], holidayToday: todayHoliday ? todayHoliday.name : null,
     cfg: { lat: 18.646972, lng: 73.784528, radius: 10, maxAccuracy: 15, startTime: '09:30', graceMin: 15, ...((cfg && cfg.value) || {}) },
     users: users.map(nUser), att: att.map(nAtt), leaves: leaves.map(nLeave), visits: visits.map(nVisit),
     pendingVisits: pv.map(nVisit), pendingLeaves: pl.map(nLeave),
   });
-  renderDash(); renderApprovals(); renderEmployees(); fillSettings();
+  renderDash(); renderApprovals(); renderEmployees(); renderHolidays(); fillSettings();
 }
 
 function chartColors() {
@@ -219,7 +239,7 @@ function renderDash() {
   const present = new Set(todayAtt.map((a) => a.uid));
   const onLeave = new Set(S.leaves.filter((l) => l.type === 'full' && l.from <= today && l.to >= today).map((l) => l.uid));
   const onVisit = new Set(S.visits.filter((v) => v.status === 'approved').map((v) => v.uid));
-  const absent = afterStart ? staff.filter((u) => !present.has(u.id) && !onLeave.has(u.id) && !onVisit.has(u.id)) : [];
+  const absent = afterStart && !S.holidayToday ? staff.filter((u) => !present.has(u.id) && !onLeave.has(u.id) && !onVisit.has(u.id)) : [];
   const late = todayAtt.filter((a) => a.late);
   const onTime = todayAtt.length - late.length;
 
@@ -229,17 +249,18 @@ function renderDash() {
   const rows = todayAtt.map((a) => `<tr>
     <td>${esc(a.name)}</td><td>${esc(a.empId)}</td><td>${fmtTime(a.inTime)}</td><td>${fmtTime(a.outTime)}</td>
     <td>${hours(a.inTime, a.outTime)}</td>
-    <td>${a.late ? '<span class="tag bad">Late</span>' : '<span class="tag ok">On time</span>'}${a.test ? ' <span class="tag">Test</span>' : ''}</td>
+    <td>${a.late ? '<span class="tag bad">Late</span>' : '<span class="tag ok">On time</span>'}${a.test ? ' <span class="tag">Test</span>' : ''}${a.holiday ? ` <span class="tag">Holiday work: ${esc(a.holiday)}</span>` : ''}</td>
     <td>${a.inLoc.distance != null ? a.inLoc.distance + ' m' : '--'}</td>
     <td>${a.inSelfie ? btn('In', { act: 'photo', id: a.inSelfie }) : ''} ${a.outSelfie ? btn('Out', { act: 'photo', id: a.outSelfie }) : ''}</td></tr>`);
 
   const chips = (list, cls) => list.length ? `<div class="chips">${list.map((x) => `<span class="tag ${cls}">${esc(x.name)}</span>`).join('')}</div>` : '<span class="muted">None</span>';
 
   $('dash').innerHTML = `
+    ${S.holidayToday ? `<div class="card"><h3 style="margin:0">Today is a holiday: ${esc(S.holidayToday)}</h3><div class="muted">Nobody is counted absent or late today. Anyone who checks in is recorded as holiday work.</div></div>` : ''}
     <div class="grid">
       <div class="card"><div class="muted">Present today</div><div class="stat">${todayAtt.length} <span class="muted">/ ${staff.length}</span></div></div>
       <div class="card"><div class="muted">Late today</div><div class="stat">${late.length}</div>${chips(late, 'bad')}</div>
-      <div class="card"><div class="muted">Absent ${afterStart ? '' : '(shown after start time + grace)'}</div><div class="stat">${absent.length}</div>${chips(absent, 'bad')}</div>
+      <div class="card"><div class="muted">Absent ${S.holidayToday ? '(holiday)' : afterStart ? '' : '(shown after start time + grace)'}</div><div class="stat">${absent.length}</div>${chips(absent, 'bad')}</div>
     </div>
     <div class="grid">
       <div class="card"><h3>Last 14 days</h3><canvas id="barC" height="200"></canvas></div>
@@ -343,6 +364,53 @@ async function reenrol(id) {
   alert('Photo updated.');
 }
 
+// ---------- holidays ----------
+const fmtDay = (d) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+const SAT_LABEL = ['1st', '2nd', '3rd', '4th', '5th'];
+
+function renderHolidays() {
+  if (!$('holidays').dataset.ready) {
+    $('holidays').dataset.ready = '1';
+    $('holidays').innerHTML = `
+      <div class="card"><h3>Weekly offs</h3>
+        <p class="muted">These repeat every month automatically. Tick the days that are off for everyone.</p>
+        <div class="chips" id="ruleBoxes" style="margin-bottom:12px"></div>
+        <button class="primary" id="saveRules" style="max-width:220px">Save weekly offs</button> <span id="rulesMsg" class="muted"></span></div>
+      <div class="card"><h3>Declare a holiday</h3>
+        <p class="muted">For Diwali and other festivals, or any special day. Pick one date, or a start and end date for several days.</p>
+        <div class="row"><input id="hName" placeholder="Holiday name, e.g. Diwali"><label class="muted">From <input id="hFrom" type="date"></label>
+          <label class="muted">To (optional) <input id="hTo" type="date"></label></div>
+        <button class="primary" id="addHoliday" style="max-width:220px">Add holiday</button> <span id="holMsg" class="muted"></span></div>
+      <div class="card"><h3>Upcoming holidays (next 5 months)</h3><div id="holList"></div></div>`;
+    $('saveRules').onclick = async () => {
+      const saturdays = [...document.querySelectorAll('#ruleBoxes [data-sat]:checked')].map((x) => +x.dataset.sat);
+      try { await call('admin-holiday-rules', { sunday: $('ruleSun').checked, saturdays }); $('rulesMsg').textContent = 'Saved.'; await loadAll(); }
+      catch (e) { $('rulesMsg').textContent = e.message; }
+    };
+    $('addHoliday').onclick = async () => {
+      const name = $('hName').value.trim(), from = $('hFrom').value, to = $('hTo').value || from;
+      if (!name || !from) { $('holMsg').textContent = 'Enter the holiday name and the date.'; return; }
+      try {
+        const r = await call('admin-holiday-add', { name, from, to });
+        $('holMsg').textContent = `Added (${r.days} day${r.days > 1 ? 's' : ''}).`;
+        ['hName', 'hFrom', 'hTo'].forEach((id) => ($(id).value = ''));
+        await loadAll();
+      } catch (e) { $('holMsg').textContent = e.message; }
+    };
+  }
+  // The tick boxes follow the saved rules (only redrawn when they changed, so a half-made choice is not wiped every 30 s).
+  const sig = JSON.stringify(S.rules);
+  if ($('ruleBoxes').dataset.sig !== sig) {
+    $('ruleBoxes').dataset.sig = sig;
+    $('ruleBoxes').innerHTML = `<label class="tag"><input id="ruleSun" type="checkbox" style="width:auto;margin:0 6px 0 0" ${S.rules.sunday ? 'checked' : ''}>Every Sunday</label>` +
+      SAT_LABEL.map((l, i) => `<label class="tag"><input data-sat="${i + 1}" type="checkbox" style="width:auto;margin:0 6px 0 0" ${(S.rules.saturdays || []).includes(i + 1) ? 'checked' : ''}>${l} Saturday</label>`).join('');
+  }
+  const rows = S.upcoming.map((h) => `<tr><td>${fmtDay(h.date)}</td><td>${esc(h.name)}</td>
+    <td>${h.kind === 'festival' ? '<span class="tag">Festival / declared</span>' : '<span class="tag ok">Weekly off</span>'}</td>
+    <td>${h.kind === 'festival' ? btn('Rename', { act: 'holRename', id: h.id, name: h.name }) + ' ' + btn('Remove', { act: 'holDelete', id: h.id, name: h.name, date: h.date }) : '<span class="muted">Change in Weekly offs</span>'}</td></tr>`);
+  $('holList').innerHTML = table(['Date', 'Holiday', 'Type', 'Actions'], rows);
+}
+
 // ---------- reports ----------
 function renderReports() {
   const today = istDate();
@@ -361,7 +429,7 @@ function renderReports() {
       // Prefix formula-like cells so Excel does not execute text typed by employees.
       const cell = (x) => { let s = String(x ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return `"${s.replace(/"/g, '""')}"`; };
       const lines = [['Date', 'Name', 'Emp ID', 'Type', 'In', 'Out', 'Hours', 'Late', 'Customer', 'Reason', 'Status'].join(',')];
-      att.map(nAtt).forEach((a) => lines.push([a.date, a.name, a.empId, a.test ? 'Office (test)' : 'Office', fmtTime(a.inTime), fmtTime(a.outTime), hours(a.inTime, a.outTime), a.late ? 'Yes' : 'No', '', '', 'Present'].map(cell).join(',')));
+      att.map(nAtt).forEach((a) => lines.push([a.date, a.name, a.empId, a.holiday ? `Office (holiday work: ${a.holiday})` : a.test ? 'Office (test)' : 'Office', fmtTime(a.inTime), fmtTime(a.outTime), hours(a.inTime, a.outTime), a.late ? 'Yes' : 'No', '', '', 'Present'].map(cell).join(',')));
       vis.map(nVisit).forEach((x) => lines.push([x.date, x.name, x.empId, TYPE_LABEL[x.type] || x.type, fmtTime(x.time), '', '', '', x.customer, x.reason, x.status].map(cell).join(',')));
       lv.map(nLeave).forEach((l) => { if (l.to >= from && l.from <= to) lines.push([`${l.from} to ${l.to}`, l.name, l.empId, 'Leave: ' + (LEAVE_LABEL[l.type] || l.type), '', '', '', '', '', l.reason, l.status].map(cell).join(',')); });
       const a = document.createElement('a');

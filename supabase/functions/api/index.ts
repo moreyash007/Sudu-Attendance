@@ -2,8 +2,9 @@
 // authenticator-app step (aal2). Employees cannot write attendance any other way (see the SQL security rules).
 //
 // Routes (POST /functions/v1/api/<route>):
-//   employee: config, check-in, check-out, visit, leave
-//   admin:    admin-create-user, admin-update-user, admin-delete-user, admin-review, admin-settings
+//   employee: config, holidays, check-in, check-out, visit, leave
+//   admin:    admin-create-user, admin-update-user, admin-delete-user, admin-review, admin-settings,
+//             admin-holiday-add, admin-holiday-update, admin-holiday-delete, admin-holiday-rules
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -38,6 +39,54 @@ async function getOffice() {
 }
 
 const dateKey = () => new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+
+// ---------- holidays ----------
+// Weekly offs are rules (every Sunday, the 1st-5th Saturday of the month); festival holidays are rows in `holidays`.
+// A festival entry wins over a weekly rule for the same date. This is the single source of truth for both pages.
+
+const DEFAULT_RULES = { sunday: true, saturdays: [2] as number[] };
+const ORDINAL = ['1st', '2nd', '3rd', '4th', '5th'];
+
+async function getRules() {
+  const { data } = await db.from('settings').select('value').eq('key', 'holiday_rules').maybeSingle();
+  const v = (data?.value ?? {}) as Record<string, unknown>;
+  const saturdays = Array.isArray(v.saturdays) ? v.saturdays.filter((n) => Number.isInteger(n) && n >= 1 && n <= 5) as number[] : DEFAULT_RULES.saturdays;
+  return { sunday: typeof v.sunday === 'boolean' ? v.sunday : DEFAULT_RULES.sunday, saturdays };
+}
+
+function weeklyHoliday(date: string, rules: { sunday: boolean; saturdays: number[] }): string | null {
+  const [y, m, d] = date.split('-').map(Number);
+  const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 = Sunday, 6 = Saturday
+  if (weekday === 0 && rules.sunday) return 'Sunday';
+  if (weekday === 6) {
+    const nth = Math.ceil(d / 7);
+    if (rules.saturdays.includes(nth)) return `${ORDINAL[nth - 1]} Saturday`;
+  }
+  return null;
+}
+
+type Holiday = { date: string; name: string; kind: 'festival' | 'weekly'; id?: string };
+
+async function holidaysBetween(from: string, to: string): Promise<Holiday[]> {
+  const [rules, { data: festivals }] = await Promise.all([
+    getRules(),
+    db.from('holidays').select('id, date, name').gte('date', from).lte('date', to),
+  ]);
+  const byDate = new Map<string, Holiday>();
+  for (const f of festivals ?? []) byDate.set(f.date, { id: f.id, date: f.date, name: f.name, kind: 'festival' });
+  const end = Date.parse(to + 'T00:00:00Z');
+  for (let t = Date.parse(from + 'T00:00:00Z'); t <= end; t += 86400000) {
+    const date = new Date(t).toISOString().slice(0, 10);
+    if (byDate.has(date)) continue;
+    const name = weeklyHoliday(date, rules);
+    if (name) byDate.set(date, { date, name, kind: 'weekly' });
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function holidayFor(date: string): Promise<Holiday | null> {
+  return (await holidaysBetween(date, date))[0] ?? null;
+}
 
 function minutesNow() {
   const [h, m] = new Date().toLocaleTimeString('en-GB', { timeZone: TZ, hour12: false }).split(':').map(Number);
@@ -145,21 +194,32 @@ async function prepare(c: Ctx, opts: { inside: boolean; maxAccuracy?: number }) 
 
 async function config(c: Ctx) {
   const o = await getOffice();
-  return { lat: o.lat, lng: o.lng, radius: o.radius, maxAccuracy: o.maxAccuracy, devMode: c.dev };
+  const h = await holidayFor(dateKey());
+  return { lat: o.lat, lng: o.lng, radius: o.radius, maxAccuracy: o.maxAccuracy, devMode: c.dev, holidayToday: h?.name ?? null };
+}
+
+// Holidays (weekly offs + festivals) between two dates, for the employee's "upcoming" list and the admin calendar.
+async function holidays(c: Ctx) {
+  const from = isDate(c.body.from) ? c.body.from : dateKey();
+  const to = isDate(c.body.to) ? c.body.to : new Date(Date.parse(from + 'T00:00:00Z') + 60 * 86400000).toISOString().slice(0, 10);
+  if (to < from || Date.parse(to) - Date.parse(from) > 400 * 86400000) fail(400, 'Choose a date range of up to 400 days.');
+  return { holidays: await holidaysBetween(from, to) };
 }
 
 async function checkIn(c: Ctx) {
   requireEmployee(c.auth);
   const { office, loc, photo } = await prepare(c, { inside: true });
   const [h, m] = String(office.startTime).split(':').map(Number);
-  const late = minutesNow() > h * 60 + m + Number(office.graceMin);
+  const today = dateKey();
+  const holiday = await holidayFor(today); // working on a holiday is allowed: it is recorded, and never counted late
+  const late = !holiday && minutesNow() > h * 60 + m + Number(office.graceMin);
   const { error } = await db.from('attendance').insert({
-    user_id: c.auth.userId, date: dateKey(), late, test: c.dev,
+    user_id: c.auth.userId, date: today, late, test: c.dev, holiday_name: holiday?.name ?? null,
     in_lat: loc.lat, in_lng: loc.lng, in_acc: loc.acc, in_dist: loc.dist, in_photo: photo,
   });
   if (error?.code === '23505') fail(409, 'You have already checked in today.');
   if (error) throw error;
-  return { late };
+  return { late, holiday: holiday?.name ?? null };
 }
 
 async function checkOut(c: Ctx) {
@@ -354,10 +414,66 @@ async function adminSettings(c: Ctx) {
   return { ok: true };
 }
 
+// ---------- admin: holidays (full control) ----------
+
+const cleanName = (s: unknown) => String(s ?? '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 100);
+
+// Declares a festival / special holiday for one day or a range (e.g. Diwali 9-12 November). Adding a date that
+// already has a festival entry just renames it.
+async function adminHolidayAdd(c: Ctx) {
+  requireAdmin(c.auth);
+  const name = cleanName(c.body.name);
+  const from = c.body.from, to = c.body.to ?? c.body.from;
+  if (!name) fail(400, 'Enter the holiday name, for example Diwali.');
+  if (!isDate(from) || !isDate(to) || to < from) fail(400, 'Pick a valid start and end date.');
+  const days = (Date.parse(to) - Date.parse(from)) / 86400000 + 1;
+  if (days > 31) fail(400, 'A holiday can cover up to 31 days at a time.');
+  const rows = [...Array(days)].map((_, i) => ({ date: new Date(Date.parse(from) + i * 86400000).toISOString().slice(0, 10), name }));
+  const { error } = await db.from('holidays').upsert(rows, { onConflict: 'date' });
+  if (error) throw error;
+  return { ok: true, days };
+}
+
+async function adminHolidayUpdate(c: Ctx) {
+  requireAdmin(c.auth);
+  const name = cleanName(c.body.name);
+  if (!isUuid(c.body.id) || !name) fail(400, 'Enter the holiday name.');
+  const { data, error } = await db.from('holidays').update({ name }).eq('id', c.body.id).select('id');
+  if (error) throw error;
+  if (!data?.length) fail(404, 'Holiday not found.');
+  return { ok: true };
+}
+
+async function adminHolidayDelete(c: Ctx) {
+  requireAdmin(c.auth);
+  if (!isUuid(c.body.id)) fail(400, 'Bad id.');
+  const { error } = await db.from('holidays').delete().eq('id', c.body.id);
+  if (error) throw error;
+  return { ok: true };
+}
+
+// The weekly offs: every Sunday on/off, and which Saturdays of the month (1st-5th) are off.
+async function adminHolidayRules(c: Ctx) {
+  requireAdmin(c.auth);
+  const { sunday, saturdays } = c.body;
+  if (typeof sunday !== 'boolean' || !Array.isArray(saturdays) || !saturdays.every((n: unknown) => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 5)) {
+    fail(400, 'Choose Sunday on or off and which Saturdays (1st to 5th) are off.');
+  }
+  const value = { sunday, saturdays: [...new Set(saturdays as number[])].sort() };
+  const { error } = await db.from('settings').upsert({ key: 'holiday_rules', value });
+  if (error) throw error;
+  return { ok: true };
+}
+
 // ---------- router ----------
 
 const ROUTES: Record<string, (c: Ctx) => Promise<unknown>> = {
   'config': config,
+  'holidays': holidays,
+  'admin-holiday-add': adminHolidayAdd,
+  'admin-holiday-update': adminHolidayUpdate,
+  'admin-holiday-delete': adminHolidayDelete,
+  'admin-holiday-rules': adminHolidayRules,
   'check-in': checkIn,
   'check-out': checkOut,
   'visit': visit,

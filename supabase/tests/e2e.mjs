@@ -217,6 +217,72 @@ async function selfie(token, uid) {
   check('invalid settings rejected', (await fn(A, 'admin-settings', { ...s0, radius: 1 })).status === 400);
   check('valid settings saved', (await fn(A, 'admin-settings', { ...s0, graceMin: 20 })).status === 200 && (await rest(A, 'GET', 'settings?key=eq.office')).data[0].value.graceMin === 20);
 
+  // ---------- holidays: weekly offs + festivals, full admin control ----------
+  const hol = (token, from, to) => fn(token, 'holidays', { from, to }, PAGES);
+  const expectedWeekly = (from, to, { sunday = true, sats = [2] } = {}) => {
+    const out = [];
+    for (let t = Date.parse(from + 'T00:00:00Z'); t <= Date.parse(to + 'T00:00:00Z'); t += 86400000) {
+      const d = new Date(t), wd = d.getUTCDay(), day = d.getUTCDate();
+      if ((wd === 0 && sunday) || (wd === 6 && sats.includes(Math.ceil(day / 7)))) out.push(d.toISOString().slice(0, 10));
+    }
+    return out;
+  };
+  r = await hol(E2, '2026-11-01', '2026-12-31');
+  check('every Sunday and the 2nd Saturday are holidays by default', r.status === 200 &&
+    JSON.stringify(r.data.holidays.map((h) => h.date)) === JSON.stringify(expectedWeekly('2026-11-01', '2026-12-31')), short(r.data).slice(0, 120));
+  check('the 2nd Saturdays are 14 Nov and 12 Dec 2026 and are named', ['2026-11-14', '2026-12-12'].every((d) => r.data.holidays.find((h) => h.date === d && h.name === '2nd Saturday')));
+  check('other Saturdays and weekdays are working days', !r.data.holidays.find((h) => h.date === '2026-11-07' || h.date === '2026-11-21' || h.date === '2026-11-18'));
+  check('a date range over 400 days is refused', (await hol(E2, '2026-01-01', '2028-01-01')).status === 400);
+  check('employees cannot declare holidays', (await fn(E2, 'admin-holiday-add', { name: 'Sneaky', from: '2026-11-18' }, PAGES)).status === 403);
+  check('employees cannot change the weekly rules', (await fn(E2, 'admin-holiday-rules', { sunday: false, saturdays: [] }, PAGES)).status === 403);
+  check('employees cannot write the holidays table directly', (await rest(E2, 'POST', 'holidays', { date: '2026-11-18', name: 'x' })).status >= 400);
+
+  r = await fn(A, 'admin-holiday-add', { name: 'Diwali (test)', from: '2026-11-09', to: '2026-11-11' }, PAGES);
+  check('admin declares Diwali for 3 days', r.status === 200 && r.data.days === 3, short(r.data));
+  r = await hol(E2, '2026-11-08', '2026-11-12');
+  const diwali = r.data.holidays.filter((h) => h.kind === 'festival');
+  check('the 3 festival days show up for employees, named', diwali.length === 3 && diwali.every((h) => h.name === 'Diwali (test)'), short(r.data));
+  check('(8 Nov is a Sunday, so it is also listed as a weekly off)', r.data.holidays.find((h) => h.date === '2026-11-08' && h.kind === 'weekly'));
+  const festId = diwali[0].id;
+  r = await fn(A, 'admin-holiday-add', { name: 'Special Sunday', from: '2026-11-15' }, PAGES);
+  r = await hol(E2, '2026-11-15', '2026-11-15');
+  check('a festival on a Sunday overrides the weekly name', r.data.holidays[0].kind === 'festival' && r.data.holidays[0].name === 'Special Sunday', short(r.data));
+  check('admin renames a holiday', (await fn(A, 'admin-holiday-update', { id: festId, name: 'Deepavali (test)' }, PAGES)).status === 200 &&
+    (await hol(E2, '2026-11-09', '2026-11-09')).data.holidays[0].name === 'Deepavali (test)');
+  const sunId = (await hol(E2, '2026-11-15', '2026-11-15')).data.holidays[0].id;
+  check('admin removes a festival and the weekly rule applies again', (await fn(A, 'admin-holiday-delete', { id: sunId }, PAGES)).status === 200 &&
+    (await hol(E2, '2026-11-15', '2026-11-15')).data.holidays[0].kind === 'weekly');
+  check('empty or oversized holiday entries are refused', (await fn(A, 'admin-holiday-add', { name: ' ', from: '2026-11-18' }, PAGES)).status === 400 &&
+    (await fn(A, 'admin-holiday-add', { name: 'Long', from: '2026-11-01', to: '2026-12-31' }, PAGES)).status === 400 &&
+    (await fn(A, 'admin-holiday-add', { name: 'Backwards', from: '2026-11-20', to: '2026-11-19' }, PAGES)).status === 400);
+
+  check('admin turns Sunday off and adds the 4th Saturday', (await fn(A, 'admin-holiday-rules', { sunday: false, saturdays: [2, 4] }, PAGES)).status === 200);
+  r = await hol(E2, '2026-11-01', '2026-11-30');
+  check('weekly rules change at once: no Sundays, 28 Nov (4th Saturday) is off', JSON.stringify(r.data.holidays.filter((h) => h.kind === 'weekly').map((h) => h.date)) === JSON.stringify(['2026-11-14', '2026-11-28']), short(r.data.holidays.filter((h) => h.kind === 'weekly').map((h) => h.date)));
+  check('invalid weekly rules are refused', (await fn(A, 'admin-holiday-rules', { sunday: 'yes', saturdays: [2] }, PAGES)).status === 400 &&
+    (await fn(A, 'admin-holiday-rules', { sunday: true, saturdays: [9] }, PAGES)).status === 400);
+  await fn(A, 'admin-holiday-rules', { sunday: true, saturdays: [2] }, PAGES); // back to the default
+  await fn(A, 'admin-holiday-delete', { id: festId }, PAGES);
+  for (const f of diwali.slice(1)) await fn(A, 'admin-holiday-delete', { id: f.id }, PAGES);
+  check('the test festivals are cleaned up', (await hol(E2, '2026-11-09', '2026-11-11')).data.holidays.every((h) => h.kind !== 'festival'));
+
+  // working on a holiday: allowed, recorded as holiday work, never counted late
+  r = await mk('e3' + RUN); const emp3 = r.data.id;
+  const E3 = (await login('e3' + RUN, 'Employee-Pass-1')).data.access_token;
+  await fn(A, 'admin-settings', { ...s0, startTime: '00:00', graceMin: 0 }, PAGES); // so a normal check-in now would be late
+  r = await fn(A, 'admin-holiday-add', { name: 'Declared today (test)', from: today }, PAGES);
+  check('admin declares today a holiday', r.status === 200, short(r.data));
+  check('the employee app is told today is a holiday', (await fn(E3, 'config', {}, PAGES)).data.holidayToday === 'Declared today (test)');
+  r = await fn(E3, 'check-in', { deviceId: 'holiday-device-1', selfiePath: await selfie(E3, emp3), lat: OFFICE.lat + 0.00003, lng: OFFICE.lng, accuracy: 6 }, PAGES);
+  check('check-in on a holiday is still allowed, and is not late', r.status === 200 && r.data.late === false && r.data.holiday === 'Declared today (test)', short(r.data));
+  const hrec = (await rest(A, 'GET', `attendance?user_id=eq.${emp3}&select=late,holiday_name`)).data[0];
+  check('the record is tagged as holiday work', hrec && hrec.holiday_name === 'Declared today (test)' && hrec.late === false, short(hrec));
+  const todayHol = (await hol(E3, today, today)).data.holidays[0];
+  await fn(A, 'admin-holiday-delete', { id: todayHol.id }, PAGES);
+  await fn(A, 'admin-settings', { ...s0 }, PAGES); // restore the settings
+  check('after removing the holiday the config no longer reports one', (await fn(E3, 'config', {}, PAGES)).data.holidayToday === null || (await fn(E3, 'config', {}, PAGES)).data.holidayToday === 'Sunday' || (await fn(E3, 'config', {}, PAGES)).data.holidayToday === '2nd Saturday');
+  await fn(A, 'admin-delete-user', { id: emp3 }, PAGES);
+
   // ---------- managing employees ----------
   const att = (await rest(A, 'GET', `attendance?select=*,profile:profiles(name,emp_id)&order=date&user_id=in.(${emp1},${emp2})`)).data;
   check('admin sees all attendance with names', att.length === 2 && att.every((a) => a.profile && a.profile.name), short(att));

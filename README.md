@@ -27,6 +27,11 @@ the `api` **Edge Function** for anything that must be checked on the server.
   dashboard with charts and late/absent lists, exports CSV, and edits the office location and rules.
 - Admin sign-in = username + password + **authenticator-app code**. This is enforced by the database and the
   server, not just the login page.
+- **Holidays, fully controlled by the admin:** every Sunday and the 2nd Saturday of each month are off by default
+  (the admin can switch any of these on or off, including the 1st-5th Saturday). For Diwali and other festivals the
+  admin declares one day or a range in **Admin > Holidays**, and can rename or remove them. On a holiday nobody is
+  counted absent or late; anyone who still checks in is recorded as **holiday work**. Employees see today's holiday
+  and the upcoming ones.
 - English / Hindi, light / dark, live map of the office zone.
 
 ## Rules enforced on the server
@@ -114,7 +119,7 @@ npx supabase start
 npx supabase status -o env      # shows API_URL, ANON_KEY, SERVICE_ROLE_KEY
 API_URL=... ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 ```
-90 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
+113 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
 leave, approvals, delete. GitHub Actions runs them on every push.
 
 ## Known limits

@@ -32,6 +32,15 @@ Checked on the live system with a temporary employee (removed afterwards): 19 of
    `powershell -File "C:\Users\yashr\Desktop\helpdesk\SUDU\attendance\scripts\set-mail-secrets.ps1"`.
 6. **Remove test data** if any (Admin > Employees > Delete) so Monday starts clean.
 
+## Holidays (admin has full control)
+
+- Admin > **Holidays**. Weekly offs are already set to **every Sunday + the 2nd Saturday** of each month; tick or untick
+  any of them (1st to 5th Saturday, Sunday) and press Save.
+- Declare festivals now so staff see them in advance: **Diwali**, Dussehra, Holi, Christmas, Republic Day and so on.
+  Enter the name and a date, or a start and end date for several days, then Add. Use Rename or Remove to correct one.
+- On a holiday nobody is counted late or absent. If someone checks in anyway it is recorded as **holiday work**.
+- Staff see "Today is a holiday" and an "Upcoming holidays" list on their page.
+
 ## Message for staff (copy and send)
 
 > Attendance: open https://suduattendance.vercel.app/ on your own phone and sign in with your username and password.

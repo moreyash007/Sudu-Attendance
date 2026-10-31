@@ -39,6 +39,11 @@
       <p id="lateNote" class="muted hidden" style="text-align:center;margin:10px 0 0" data-i18n="lateNote">You were marked late today.</p>
     </div>
 
+    <div id="holidayBanner" class="card hidden">
+      <b id="holidayText"></b>
+      <div class="muted" data-i18n="holidaySub">You can still check in; it will be recorded as holiday work.</div>
+    </div>
+
     <div class="card">
       <div id="map" role="img" aria-label="Office map"></div>
       <div class="row" style="margin-bottom:0"><span id="zoneTag" class="tag">...</span><span id="zoneInfo" class="muted"></span></div>
@@ -80,6 +85,8 @@
     </section>
 
     <section id="history" class="card hidden"><div id="hList"></div></section>
+
+    <div class="card"><h4 data-i18n="upcoming">Upcoming holidays</h4><div id="holList"></div></div>
   </main>
 </div>
 <div id="toast" role="status"></div>
@@ -109,6 +116,8 @@ const I18N = {
     submitSelfie: 'Take selfie & submit', visitNote: 'Your GPS location and selfie are recorded. An admin approves the entry.',
     leaveFull: 'Full day leave', leaveFirst: 'Half day (first half)', leaveSecond: 'Half day (second half)',
     from: 'From', to: 'To', apply: 'Apply for leave', myRequests: 'My requests', none: 'None yet.', noRecords: 'No records yet.',
+    holidayToday: 'Today is a holiday: ', holidaySub: 'You can still check in; it will be recorded as holiday work.',
+    upcoming: 'Upcoming holidays', noUpcoming: 'No holidays in the next 45 days.', holidayWork: 'Holiday work',
     late: 'Late', inside: 'In office zone', outside: 'Outside zone', weak: 'Weak GPS', locating: 'Locating...',
     away: 'away', accuracy: 'accuracy', gettingLoc: 'Getting your location...', submitting: 'Submitting...',
     done: 'Done', doneLate: 'Done (marked late)', needReason: 'Enter a reason.', needCustomer: 'Enter the customer name.',
@@ -133,6 +142,8 @@ const I18N = {
     submitSelfie: 'सेल्फी लें और भेजें', visitNote: 'आपकी लोकेशन और सेल्फी दर्ज होती है। एडमिन इसे मंज़ूर करता है।',
     leaveFull: 'पूरे दिन की छुट्टी', leaveFirst: 'आधे दिन की (पहला भाग)', leaveSecond: 'आधे दिन की (दूसरा भाग)',
     from: 'से', to: 'तक', apply: 'छुट्टी के लिए आवेदन', myRequests: 'मेरे आवेदन', none: 'अभी कोई नहीं।', noRecords: 'अभी कोई रिकॉर्ड नहीं।',
+    holidayToday: 'आज अवकाश है: ', holidaySub: 'आप चाहें तो चेक इन कर सकते हैं; यह अवकाश के दिन का काम दर्ज होगा।',
+    upcoming: 'आने वाली छुट्टियाँ', noUpcoming: 'अगले 45 दिनों में कोई अवकाश नहीं।', holidayWork: 'अवकाश में काम',
     late: 'लेट', inside: 'ऑफिस क्षेत्र में', outside: 'क्षेत्र के बाहर', weak: 'कमज़ोर GPS', locating: 'लोकेशन खोज रहे हैं...',
     away: 'दूर', accuracy: 'सटीकता', gettingLoc: 'आपकी लोकेशन ली जा रही है...', submitting: 'भेजा जा रहा है...',
     done: 'हो गया', doneLate: 'हो गया (लेट चिह्नित)', needReason: 'कारण लिखें।', needCustomer: 'ग्राहक का नाम लिखें।',
@@ -154,7 +165,7 @@ function applyLang() {
   document.querySelectorAll('[data-i18n-ph]').forEach((e) => (e.placeholder = t(e.dataset.i18nPh)));
   const other = lang === 'en' ? 'हिन्दी' : 'English';
   $('langBtn').textContent = other; $('langBtn1').textContent = other;
-  renderMainBtn(); renderZone(); renderLists();
+  renderMainBtn(); renderZone(); renderLists(); renderHoliday();
 }
 function switchLang() {
   lang = lang === 'en' ? 'hi' : 'en';
@@ -318,9 +329,11 @@ async function enter(userId) {
 }
 
 async function refresh() {
-  // Picks up changes the admin made in Settings (runs every 30 s and after each action).
+  // Picks up changes the admin made in Settings and Holidays (runs every 30 s and after each action).
   try { if (await loadOffice()) initMap(); } catch (e) {}
   renderZone();
+  try { upcomingHolidays = (await call('holidays', { from: istToday(), to: daysFromNow(45) })).holidays; } catch (e) {}
+  renderHoliday();
   const uid = me.id;
   const [a, h, l] = await Promise.all([
     sb.from('attendance').select('*').eq('user_id', uid).eq('date', istToday()).maybeSingle(),
@@ -334,6 +347,19 @@ async function refresh() {
   renderMainBtn(); renderLists();
 }
 
+let upcomingHolidays = [];
+const daysFromNow = (n) => new Date(Date.now() + n * 86400000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+function renderHoliday() {
+  const name = office.holidayToday;
+  $('holidayBanner').classList.toggle('hidden', !name);
+  $('holidayText').textContent = name ? t('holidayToday') + name : '';
+  const fmt = (d) => new Date(d + 'T00:00:00Z').toLocaleDateString(lang === 'hi' ? 'hi-IN' : 'en-IN', { weekday: 'short', day: '2-digit', month: 'short', timeZone: 'UTC' });
+  const next = upcomingHolidays.filter((h) => h.date > istToday()).slice(0, 8);
+  $('holList').innerHTML = next.map((h) => `<div class="item"><span>${esc(fmt(h.date))}</span><span class="muted">${esc(h.name)}</span></div>`).join('')
+    || `<p class="muted">${t('noUpcoming')}</p>`;
+}
+
 function renderMainBtn() {
   const b = $('mainBtn');
   b.dataset.route = !today ? 'check-in' : today.out_time ? '' : 'check-out';
@@ -343,7 +369,7 @@ function renderMainBtn() {
 
 function renderLists() {
   $('hList').innerHTML = history.map((a) =>
-    `<div class="item"><span>${esc(a.date)} ${a.late ? `<span class="tag bad">${t('late')}</span>` : ''}</span>
+    `<div class="item"><span>${esc(a.date)} ${a.late ? `<span class="tag bad">${t('late')}</span>` : ''}${a.holiday_name ? ` <span class="tag">${t('holidayWork')}</span>` : ''}</span>
      <span class="muted">${fmtTime(a.in_time)} - ${fmtTime(a.out_time)}</span></div>`).join('') || `<p class="muted">${t('noRecords')}</p>`;
   $('lList').innerHTML = leaves.map((l) =>
     `<div class="item"><span>${esc(l.from_date)}${l.to_date !== l.from_date ? ' → ' + esc(l.to_date) : ''} · ${t('t_' + l.type)}<br><span class="muted">${esc(l.reason)}</span></span>

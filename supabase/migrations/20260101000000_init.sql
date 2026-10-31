@@ -112,6 +112,30 @@ create policy settings_read   on public.settings   for select to authenticated u
 revoke update, delete, truncate on public.profiles, public.attendance, public.visits, public.leaves, public.settings from authenticated;
 revoke insert on public.profiles, public.attendance, public.visits, public.leaves, public.settings from authenticated;
 
+-- ---------- holidays ----------
+-- Festival / declared holidays are one row per day (the admin adds a range, one row each). The weekly offs
+-- (every Sunday, 2nd Saturday...) are rules stored in settings ('holiday_rules') and worked out by the function.
+
+alter table public.attendance add column if not exists holiday_name text; -- set when someone works on a holiday
+
+create table if not exists public.holidays (
+  id         uuid primary key default gen_random_uuid(),
+  date       date not null unique,
+  name       text not null check (char_length(name) between 1 and 100),
+  created_at timestamptz not null default now()
+);
+create index if not exists holidays_date_idx on public.holidays (date);
+
+insert into public.settings (key, value) values
+  ('holiday_rules', '{"sunday": true, "saturdays": [2]}')
+on conflict (key) do nothing;
+
+alter table public.holidays enable row level security;
+revoke all on public.holidays from anon;
+drop policy if exists holidays_read on public.holidays;
+create policy holidays_read on public.holidays for select to authenticated using (true);
+revoke insert, update, delete, truncate on public.holidays from authenticated; -- only the admin, via the function
+
 -- ---------- private photo bucket ----------
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)

@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SUDU Attendance</title>
+<script src="theme.js"></script>
+<link rel="stylesheet" href="glass.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+</head>
+<body>
+
+<div id="loginBox" class="card center-box hidden">
+  <img class="logo big" src="logo.png" alt="SUDU Logistics">
+  <h2 data-i18n="attendance">Attendance</h2>
+  <input id="username" data-i18n-ph="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
+  <input id="password" type="password" data-i18n-ph="password" placeholder="Password" autocomplete="current-password">
+  <button class="primary" id="loginBtn" data-i18n="signin">Sign in</button>
+  <div id="loginErr" class="err"></div>
+  <div class="tools" style="justify-content:center"><button id="langBtn1" type="button">हिन्दी</button><button id="themeBtn1" type="button">&#9680;</button></div>
+</div>
+
+<div id="app" class="hidden">
+  <div id="devBanner" class="banner hidden" data-i18n="devBanner">TEST MODE: location check is off. Records are marked as test.</div>
+  <header>
+    <div class="brand"><img class="logo" src="logo.png" alt="SUDU Logistics"><span id="who"></span></div>
+    <div class="tools">
+      <button id="langBtn" type="button" aria-label="Language">हिन्दी</button>
+      <button id="themeBtn" type="button" aria-label="Theme">&#9680;</button>
+      <button id="logout" type="button" data-i18n="signout">Sign out</button>
+    </div>
+  </header>
+  <main>
+    <div class="card">
+      <div class="times">
+        <div><small data-i18n="in">In</small><b id="tIn">--:--</b></div>
+        <div><small data-i18n="out">Out</small><b id="tOut">--:--</b></div>
+      </div>
+      <p id="lateNote" class="muted hidden" style="text-align:center;margin:10px 0 0" data-i18n="lateNote">You were marked late today.</p>
+    </div>
+
+    <div class="card">
+      <div id="map" role="img" aria-label="Office map"></div>
+      <div class="row" style="margin-bottom:0"><span id="zoneTag" class="tag">...</span><span id="zoneInfo" class="muted"></span></div>
+    </div>
+
+    <button class="primary" id="mainBtn" data-i18n="checkin">Check in</button>
+    <p class="muted" style="text-align:center" data-i18n="hint">You must be inside the office area. A selfie and your location are recorded each time.</p>
+
+    <nav id="tabs">
+      <button data-tab="visit" data-i18n="tabVisit">Out duty / visit</button>
+      <button data-tab="leave" data-i18n="tabLeave">Leave</button>
+      <button data-tab="history" data-i18n="tabHistory">History</button>
+    </nav>
+
+    <section id="visit" class="card hidden">
+      <select id="vType">
+        <option value="customer_visit" data-i18n="customerVisit">Customer visit</option>
+        <option value="out_duty" data-i18n="outDuty">Out duty</option>
+        <option value="custom_visit" data-i18n="customVisit">Custom visit</option>
+      </select>
+      <input id="vCustomer" data-i18n-ph="customerPh" placeholder="Customer name / place">
+      <textarea id="vReason" rows="3" data-i18n-ph="reasonPh" placeholder="Reason / purpose"></textarea>
+      <button class="primary" id="vSend" data-i18n="submitSelfie">Take selfie &amp; submit</button>
+      <p class="muted" data-i18n="visitNote">Your GPS location and selfie are recorded. An admin approves the entry.</p>
+    </section>
+
+    <section id="leave" class="card hidden">
+      <select id="lType">
+        <option value="full" data-i18n="leaveFull">Full day leave</option>
+        <option value="half_first" data-i18n="leaveFirst">Half day (first half)</option>
+        <option value="half_second" data-i18n="leaveSecond">Half day (second half)</option>
+      </select>
+      <label class="muted" data-i18n="from">From</label><input id="lFrom" type="date">
+      <div id="lToWrap"><label class="muted" data-i18n="to">To</label><input id="lTo" type="date"></div>
+      <textarea id="lReason" rows="3" data-i18n-ph="reasonPh2" placeholder="Reason"></textarea>
+      <button class="primary" id="lSend" data-i18n="apply">Apply for leave</button>
+      <h4 data-i18n="myRequests" style="margin-top:16px">My requests</h4>
+      <div id="lList"></div>
+    </section>
+
+    <section id="history" class="card hidden"><div id="hList"></div></section>
+  </main>
+</div>
+<div id="toast" role="status"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script src="camera.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }) : '--:--';
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---------- language ----------
+const I18N = {
+  en: {
+    devBanner: 'TEST MODE: location check is off. Records are marked as test.',
+    attendance: 'Attendance', username: 'Username', password: 'Password', signin: 'Sign in', signout: 'Sign out',
+    wrongLogin: 'Wrong username or password.', adminHere: 'This is the employee page. Admins sign in at /admin/.',
+    in: 'In', out: 'Out', lateNote: 'You were marked late today.',
+    checkin: 'Check in', checkout: 'Check out', dayDone: 'Day complete',
+    hint: 'You must be inside the office area. A selfie and your location are recorded each time.',
+    tabVisit: 'Out duty / visit', tabLeave: 'Leave', tabHistory: 'History',
+    customerVisit: 'Customer visit', outDuty: 'Out duty', customVisit: 'Custom visit',
+    customerPh: 'Customer name / place', reasonPh: 'Reason / purpose', reasonPh2: 'Reason',
+    submitSelfie: 'Take selfie & submit', visitNote: 'Your GPS location and selfie are recorded. An admin approves the entry.',
+    leaveFull: 'Full day leave', leaveFirst: 'Half day (first half)', leaveSecond: 'Half day (second half)',
+    from: 'From', to: 'To', apply: 'Apply for leave', myRequests: 'My requests', none: 'None yet.', noRecords: 'No records yet.',
+    late: 'Late', inside: 'In office zone', outside: 'Outside zone', weak: 'Weak GPS', locating: 'Locating...',
+    away: 'away', accuracy: 'accuracy', gettingLoc: 'Getting your location...', submitting: 'Submitting...',
+    done: 'Done', doneLate: 'Done (marked late)', needReason: 'Enter a reason.', needCustomer: 'Enter the customer name.',
+    badDates: 'Pick valid dates and enter a reason.', leaveSent: 'Leave request sent.',
+    capture: 'Capture selfie', cancel: 'Cancel', ready: 'Look straight at the camera.',
+    camera: 'Camera blocked. Allow camera access for this site.',
+    cancelled: 'Selfie is required.',
+    locBlocked: 'Location blocked. Allow location for this site in your browser settings.', locFail: 'Could not get your location. Turn on GPS and try again.',
+    st_pending: 'Pending', st_approved: 'Approved', st_rejected: 'Rejected',
+    t_full: 'Full day', t_half_first: 'Half day (1st half)', t_half_second: 'Half day (2nd half)',
+  },
+  hi: {
+    devBanner: 'टेस्ट मोड: लोकेशन जाँच बंद है। रिकॉर्ड टेस्ट चिह्नित होंगे।',
+    attendance: 'उपस्थिति', username: 'यूज़रनेम', password: 'पासवर्ड', signin: 'साइन इन', signout: 'साइन आउट',
+    wrongLogin: 'यूज़रनेम या पासवर्ड गलत है।', adminHere: 'यह कर्मचारी पेज है। एडमिन /admin/ पर साइन इन करें।',
+    in: 'आगमन', out: 'प्रस्थान', lateNote: 'आज आपको लेट चिह्नित किया गया है।',
+    checkin: 'चेक इन', checkout: 'चेक आउट', dayDone: 'दिन पूरा हुआ',
+    hint: 'आपको ऑफिस क्षेत्र के अंदर होना चाहिए। हर बार आपकी सेल्फी और लोकेशन दर्ज की जाती है।',
+    tabVisit: 'बाहर ड्यूटी / विज़िट', tabLeave: 'छुट्टी', tabHistory: 'इतिहास',
+    customerVisit: 'ग्राहक विज़िट', outDuty: 'बाहर ड्यूटी', customVisit: 'अन्य विज़िट',
+    customerPh: 'ग्राहक का नाम / स्थान', reasonPh: 'कारण / उद्देश्य', reasonPh2: 'कारण',
+    submitSelfie: 'सेल्फी लें और भेजें', visitNote: 'आपकी लोकेशन और सेल्फी दर्ज होती है। एडमिन इसे मंज़ूर करता है।',
+    leaveFull: 'पूरे दिन की छुट्टी', leaveFirst: 'आधे दिन की (पहला भाग)', leaveSecond: 'आधे दिन की (दूसरा भाग)',
+    from: 'से', to: 'तक', apply: 'छुट्टी के लिए आवेदन', myRequests: 'मेरे आवेदन', none: 'अभी कोई नहीं।', noRecords: 'अभी कोई रिकॉर्ड नहीं।',
+    late: 'लेट', inside: 'ऑफिस क्षेत्र में', outside: 'क्षेत्र के बाहर', weak: 'कमज़ोर GPS', locating: 'लोकेशन खोज रहे हैं...',
+    away: 'दूर', accuracy: 'सटीकता', gettingLoc: 'आपकी लोकेशन ली जा रही है...', submitting: 'भेजा जा रहा है...',
+    done: 'हो गया', doneLate: 'हो गया (लेट चिह्नित)', needReason: 'कारण लिखें।', needCustomer: 'ग्राहक का नाम लिखें।',
+    badDates: 'सही तारीख चुनें और कारण लिखें।', leaveSent: 'छुट्टी का आवेदन भेज दिया गया।',
+    capture: 'सेल्फी लें', cancel: 'रद्द करें', ready: 'सीधे कैमरे की ओर देखें।',
+    camera: 'कैमरा बंद है। इस साइट के लिए कैमरा अनुमति दें।',
+    cancelled: 'सेल्फी आवश्यक है।',
+    locBlocked: 'लोकेशन बंद है। ब्राउज़र सेटिंग में इस साइट के लिए लोकेशन की अनुमति दें।', locFail: 'लोकेशन नहीं मिली। GPS चालू करके दोबारा कोशिश करें।',
+    st_pending: 'लंबित', st_approved: 'मंज़ूर', st_rejected: 'अस्वीकृत',
+    t_full: 'पूरा दिन', t_half_first: 'आधा दिन (पहला)', t_half_second: 'आधा दिन (दूसरा)',
+  },
+};
+let lang = 'en';
+try { lang = localStorage.getItem('sudu_lang') === 'hi' ? 'hi' : 'en'; } catch (e) {}
+const t = (k) => I18N[lang][k] ?? I18N.en[k] ?? k;
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll('[data-i18n]').forEach((e) => (e.textContent = t(e.dataset.i18n)));
+  document.querySelectorAll('[data-i18n-ph]').forEach((e) => (e.placeholder = t(e.dataset.i18nPh)));
+  const other = lang === 'en' ? 'हिन्दी' : 'English';
+  $('langBtn').textContent = other; $('langBtn1').textContent = other;
+  renderMainBtn(); renderZone(); renderLists();
+}
+function switchLang() {
+  lang = lang === 'en' ? 'hi' : 'en';
+  try { localStorage.setItem('sudu_lang', lang); } catch (e) {}
+  applyLang();
+}
+['langBtn', 'langBtn1'].forEach((id) => ($(id).onclick = switchLang));
+['themeBtn', 'themeBtn1'].forEach((id) => ($(id).onclick = () => window.toggleTheme()));
+
+let toastTimer;
+function toast(msg) {
+  const el = $('toast'); el.textContent = msg; el.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (el.style.display = 'none'), 6000);
+}
+
+// ---------- device lock ----------
+// A random id kept in this browser; the server binds each account to the first one it sees.
+function deviceId() {
+  let id = localStorage.getItem('sudu_device');
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem('sudu_device', id); }
+  return id;
+}
+
+// ---------- location + map ----------
+const DEFAULT_OFFICE = { lat: 18.646972, lng: 73.784528, radius: 10, maxAccuracy: 15 };
+let office = { ...DEFAULT_OFFICE };
+let map, meMarker, fitted = false, lastFix = null, watchId = null;
+
+function metres(a, b, c, d) {
+  const R = 6371000, r = (x) => (x * Math.PI) / 180;
+  const h = Math.sin(r(c - a) / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(r(d - b) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function initMap() {
+  if (map) { map.remove(); map = null; meMarker = null; fitted = false; }
+  map = L.map('map').setView([office.lat, office.lng], 19);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+  L.circle([office.lat, office.lng], { radius: office.radius, color: '#d7a657', fillColor: '#d7a657', fillOpacity: 0.3 }).addTo(map);
+  L.marker([office.lat, office.lng]).addTo(map).bindTooltip('SUDU Logistics');
+}
+
+function renderZone() {
+  const tag = $('zoneTag'), info = $('zoneInfo');
+  tag.className = 'tag';
+  if (!lastFix) { tag.textContent = t('locating'); info.textContent = ''; return; }
+  const d = Math.round(metres(lastFix.lat, lastFix.lng, office.lat, office.lng));
+  if (lastFix.accuracy > office.maxAccuracy) { tag.textContent = t('weak'); tag.classList.add('bad'); }
+  else if (d <= office.radius) { tag.textContent = t('inside'); tag.classList.add('ok'); }
+  else { tag.textContent = t('outside'); tag.classList.add('bad'); }
+  info.textContent = `${d} m ${t('away')} · ${t('accuracy')} ±${Math.round(lastFix.accuracy)} m`;
+}
+
+function startWatch() {
+  if (!navigator.geolocation || watchId !== null) return;
+  watchId = navigator.geolocation.watchPosition((p) => {
+    lastFix = { lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy };
+    const ll = [lastFix.lat, lastFix.lng];
+    if (map) {
+      if (!meMarker) meMarker = L.circleMarker(ll, { radius: 8, color: '#fff', weight: 2, fillColor: '#1565c0', fillOpacity: 1 }).addTo(map);
+      else meMarker.setLatLng(ll);
+      if (!fitted) { fitted = true; map.fitBounds(L.latLngBounds([ll, [office.lat, office.lng]]).pad(0.5), { maxZoom: 19 }); }
+    }
+    renderZone();
+  }, () => {}, { enableHighAccuracy: true, maximumAge: 0 });
+}
+function stopWatch() { if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null; lastFix = null; }
+
+// Waits up to `ms` for a fix at least as accurate as the server requires, else returns the best seen.
+function bestFix(maxAcc, ms = 15000) {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error(t('locFail')));
+    let best = null, timer, id;
+    const finish = () => {
+      clearTimeout(timer); navigator.geolocation.clearWatch(id);
+      best ? resolve(best) : reject(new Error(t('locFail')));
+    };
+    id = navigator.geolocation.watchPosition((p) => {
+      const c = p.coords;
+      if (!best || c.accuracy < best.accuracy) best = { lat: c.latitude, lng: c.longitude, accuracy: c.accuracy };
+      if (best.accuracy <= maxAcc) finish();
+    }, (e) => {
+      clearTimeout(timer); navigator.geolocation.clearWatch(id);
+      reject(new Error(e.code === 1 ? t('locBlocked') : t('locFail')));
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: ms });
+    timer = setTimeout(finish, ms);
+  });
+}
+
+// ---------- submit flow: location -> selfie -> server ----------
+const { sb, emailOf, call } = Sudu;
+const istToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+let me = null; // { id, name, role }
+
+let busy = false;
+function setBusy(v) { busy = v; ['mainBtn', 'vSend', 'lSend'].forEach((id) => ($(id).disabled = v)); renderMainBtn(); }
+
+async function submit(route, extra = {}) {
+  if (busy) return false;
+  setBusy(true);
+  try {
+    toast(t('gettingLoc'));
+    // In local test mode a PC without GPS is fine: wait briefly, then continue without a location.
+    const loc = office.devMode ? await bestFix(office.maxAccuracy, 5000).catch(() => ({})) : await bestFix(office.maxAccuracy);
+    const shot = await Camera.capture({
+      capture: t('capture'), cancel: t('cancel'), ready: t('ready'), camera: t('camera'), cancelled: t('cancelled'),
+    });
+    toast(t('submitting'));
+    // The selfie goes straight into this employee's private folder; the server then checks it is there.
+    const path = `selfies/${me.id}/${Date.now()}.jpg`;
+    const up = await sb.storage.from('photos').upload(path, shot.blob, { contentType: 'image/jpeg' });
+    if (up.error) throw new Error(up.error.message);
+    const res = await call(route, { ...loc, ...extra, selfiePath: path, deviceId: deviceId() });
+    toast(res.late ? t('doneLate') : t('done'));
+    await refresh();
+    return true;
+  } catch (e) {
+    toast(e.message || 'Something went wrong.');
+    return false;
+  } finally { setBusy(false); }
+}
+
+// ---------- auth + data ----------
+let today = null, leaves = [], history = [], pollTimer = null;
+
+function showLogin() {
+  stopWatch(); clearInterval(pollTimer); me = null;
+  $('loginBox').classList.remove('hidden'); $('app').classList.add('hidden');
+}
+
+async function enter(userId) {
+  const { data: prof } = await sb.from('profiles').select('id, name, role, active').eq('id', userId).maybeSingle();
+  if (!prof || !prof.active || prof.role !== 'employee') {
+    const wasAdmin = prof && prof.role === 'admin';
+    await sb.auth.signOut(); showLogin();
+    $('loginErr').textContent = wasAdmin ? t('adminHere') : t('wrongLogin');
+    return;
+  }
+  me = prof;
+  $('loginBox').classList.add('hidden'); $('app').classList.remove('hidden');
+  $('who').textContent = prof.name;
+  try { office = { ...DEFAULT_OFFICE, ...(await call('config')) }; } catch (e) {}
+  $('devBanner').classList.toggle('hidden', !office.devMode);
+  initMap(); startWatch();
+  await refresh();
+  clearInterval(pollTimer); pollTimer = setInterval(() => refresh().catch(() => {}), 30000);
+}
+
+async function refresh() {
+  const uid = me.id;
+  const [a, h, l] = await Promise.all([
+    sb.from('attendance').select('*').eq('user_id', uid).eq('date', istToday()).maybeSingle(),
+    sb.from('attendance').select('*').eq('user_id', uid).order('date', { ascending: false }).limit(60),
+    sb.from('leaves').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(20),
+  ]);
+  today = a.data; history = h.data || []; leaves = l.data || [];
+  $('tIn').textContent = fmtTime(today && today.in_time);
+  $('tOut').textContent = fmtTime(today && today.out_time);
+  $('lateNote').classList.toggle('hidden', !(today && today.late));
+  renderMainBtn(); renderLists();
+}
+
+function renderMainBtn() {
+  const b = $('mainBtn');
+  b.dataset.route = !today ? 'check-in' : today.out_time ? '' : 'check-out';
+  b.textContent = !today ? t('checkin') : today.out_time ? t('dayDone') : t('checkout');
+  b.disabled = busy || !!(today && today.out_time);
+}
+
+function renderLists() {
+  $('hList').innerHTML = history.map((a) =>
+    `<div class="item"><span>${esc(a.date)} ${a.late ? `<span class="tag bad">${t('late')}</span>` : ''}</span>
+     <span class="muted">${fmtTime(a.in_time)} - ${fmtTime(a.out_time)}</span></div>`).join('') || `<p class="muted">${t('noRecords')}</p>`;
+  $('lList').innerHTML = leaves.map((l) =>
+    `<div class="item"><span>${esc(l.from_date)}${l.to_date !== l.from_date ? ' → ' + esc(l.to_date) : ''} · ${t('t_' + l.type)}<br><span class="muted">${esc(l.reason)}</span></span>
+     <span class="tag ${l.status === 'approved' ? 'ok' : l.status === 'rejected' ? 'bad' : ''}">${t('st_' + l.status)}</span></div>`).join('') || `<p class="muted">${t('none')}</p>`;
+}
+
+$('loginBtn').onclick = async () => {
+  $('loginErr').textContent = '';
+  const username = $('username').value.trim();
+  if (!username || !$('password').value) return;
+  const { data, error } = await sb.auth.signInWithPassword({ email: emailOf(username), password: $('password').value });
+  if (error) { $('loginErr').textContent = /invalid|credentials/i.test(error.message) ? t('wrongLogin') : error.message; return; }
+  $('password').value = '';
+  try { await enter(data.user.id); } catch (e) { $('loginErr').textContent = e.message; }
+};
+$('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+$('logout').onclick = async () => { await sb.auth.signOut(); today = null; showLogin(); };
+
+$('mainBtn').onclick = () => { const route = $('mainBtn').dataset.route; if (route) submit(route); };
+
+$('vSend').onclick = async () => {
+  const reason = $('vReason').value.trim(), customer = $('vCustomer').value.trim(), type = $('vType').value;
+  if (!reason) return toast(t('needReason'));
+  if (type === 'customer_visit' && !customer) return toast(t('needCustomer'));
+  if (await submit('visit', { type, customer, reason })) { $('vReason').value = ''; $('vCustomer').value = ''; }
+};
+
+$('lType').onchange = () => $('lToWrap').classList.toggle('hidden', $('lType').value !== 'full');
+$('lSend').onclick = async () => {
+  const type = $('lType').value, from = $('lFrom').value, reason = $('lReason').value.trim();
+  const to = type === 'full' ? $('lTo').value : from;
+  if (!from || !to || to < from || !reason) return toast(t('badDates'));
+  const { error } = await sb.from('leaves').insert({ user_id: me.id, type, from_date: from, to_date: to, reason });
+  if (error) return toast(error.message);
+  $('lReason').value = ''; toast(t('leaveSent')); await refresh();
+};
+
+$('tabs').onclick = (e) => {
+  const tab = e.target.dataset.tab; if (!tab) return;
+  const opening = $(tab).classList.contains('hidden');
+  ['visit', 'leave', 'history'].forEach((id) => $(id).classList.toggle('hidden', id !== tab || !opening));
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', opening && b === e.target));
+};
+
+applyLang();
+(async () => {
+  try {
+    const { data } = await sb.auth.getSession();
+    if (data.session) await enter(data.session.user.id); else showLogin();
+  } catch (e) { showLogin(); }
+})();
+</script>
+</body>
+</html>

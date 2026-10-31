@@ -1,0 +1,40 @@
+# Supabase CLI settings (used by `supabase link`, `supabase db push`, `supabase functions deploy`, and local testing).
+project_id = "sudu-attendance"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+
+[db]
+port = 54322
+major_version = 15
+
+[auth]
+enabled = true
+site_url = "http://localhost:8090"
+enable_signup = false                # accounts are created only by the admin, through the Edge Function
+minimum_password_length = 8
+
+[auth.email]
+enable_confirmations = false
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[storage]
+enabled = true
+
+[functions.api]
+# The function checks the signed-in user itself (and works with the new publishable keys).
+verify_jwt = false
+
+# Used only by the LOCAL Supabase (supabase start / CI): lets the end-to-end tests run the function in test mode.
+# The hosted project uses its own secrets from the dashboard, where ALLOW_LOCAL_TEST must stay unset.
+[edge_runtime]
+enabled = true
+
+[edge_runtime.secrets]
+ALLOW_LOCAL_TEST = "true"
+EMAIL_DOMAIN = "attendance.invalid"

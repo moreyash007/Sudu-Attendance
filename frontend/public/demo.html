@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SUDU Attendance Demo</title>
+<script src="theme.js"></script>
+<link rel="stylesheet" href="glass.css">
+<style>
+  .banner { text-align:center; padding:8px 12px; font-size:13px; background:rgba(215,166,87,.25); border-bottom:1px solid var(--line); }
+  .switch { display:flex; gap:8px; justify-content:center; padding:12px; }
+  .switch button { width:auto; padding:10px 22px; border-radius:999px; margin:0; }
+  .switch button.active { color:#2b1c17; border:0; background:linear-gradient(135deg,var(--gold-2),var(--gold)); font-weight:700; }
+  #radar { width:100%; height:220px; border-radius:14px; background:var(--glass); }
+  .sim { background:rgba(106,166,232,.12); border:1px dashed rgba(106,166,232,.6); border-radius:14px; padding:12px; margin-bottom:16px; }
+  .sim label { display:flex; justify-content:space-between; font-size:14px; }
+  input[type=range] { padding:0; margin:6px 0 12px; }
+  .wrap { max-width:1000px; margin:0 auto; padding:0 16px 40px; }
+  .phone { max-width:480px; margin:0 auto; }
+</style>
+</head>
+<body>
+<div class="banner">DEMO with fake data &mdash; nothing is saved or sent anywhere.</div>
+<div class="switch"><button id="sE" class="active">Employee view</button><button id="sA">Admin view</button>
+  <button id="th" type="button" style="width:auto;margin:0">&#9680;</button></div>
+
+<!-- ================= EMPLOYEE ================= -->
+<div id="emp" class="wrap"><div class="phone">
+  <div class="card center-box" style="margin:0 0 16px;max-width:none"><img class="logo big" src="logo.png" alt="SUDU Logistics">
+    <div class="muted">Signed in as <b>Rahul Sharma</b> (EMP-014)</div></div>
+
+  <div class="card"><div class="times">
+    <div><small>In</small><b id="tIn">--:--</b></div><div><small>Out</small><b id="tOut">--:--</b></div></div></div>
+
+  <div class="card">
+    <svg id="radar" viewBox="-100 -75 200 150"></svg>
+    <div class="row" style="margin:8px 0 0"><span id="zone" class="tag">...</span><span id="zinfo" class="muted"></span></div>
+  </div>
+
+  <div class="sim"><b>Demo controls</b> <span class="muted">(in the real app these come from the phone)</span>
+    <label style="margin-top:8px">Distance from office <b id="dv">4 m</b></label><input id="dist" type="range" min="0" max="60" value="4">
+    <label>GPS accuracy <b id="av">6 m</b></label><input id="acc" type="range" min="3" max="40" value="6">
+  </div>
+
+  <button class="primary" id="main">Check in</button>
+  <p class="muted" style="text-align:center">You must be inside the office area. A selfie and your location are recorded each time.</p>
+
+  <div class="card">
+    <h4>Leave</h4>
+    <select id="lt"><option value="full">Full day leave</option><option value="half_first">Half day (first half)</option><option value="half_second">Half day (second half)</option></select>
+    <input id="ld" type="date"><textarea id="lr" rows="2" placeholder="Reason"></textarea>
+    <button class="primary" id="ls">Apply for leave</button><div id="ll" style="margin-top:12px"></div>
+  </div>
+</div></div>
+
+<!-- ================= ADMIN ================= -->
+<div id="adm" class="wrap hidden">
+  <div id="a2" class="card center-box" style="max-width:380px">
+    <img class="logo big" src="logo.png" alt="SUDU Logistics"><h2>Admin sign in</h2>
+    <div id="a2a"><input value="admin@sudulogistics.com" readonly><input type="password" value="••••••••••••" readonly><button class="primary" id="a2n">Continue</button></div>
+    <div id="a2b" class="hidden"><p class="muted">Open your authenticator app and enter the 6-digit code. (Demo: type any 6 digits.)</p>
+      <input id="code" inputmode="numeric" maxlength="6" placeholder="123456"><button class="primary" id="a2v">Verify</button><div id="a2e" class="err"></div></div>
+  </div>
+  <div id="adash" class="hidden">
+    <nav id="atabs"><button data-t="d" class="active">Dashboard</button><button data-t="p">Approvals</button><button data-t="e">Employees</button><button data-t="s">Settings</button></nav>
+    <section id="d"></section><section id="p" class="hidden"></section><section id="e" class="hidden"></section><section id="s" class="hidden"></section>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const toast = (m) => { const t = $('toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(() => (t.style.display = 'none'), 4500); };
+const hhmm = () => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+$('th').onclick = () => { window.toggleTheme(); renderDash(); };
+
+const cfg = { radius: 10, acc: 15, start: '09:30', grace: 15 };
+const st = { in: null, out: null, late: false };
+const staff = [
+  { n: 'Priya Patil', t: '09:12', late: false, d: 4, f: 0.31 }, { n: 'Amit Joshi', t: '09:58', late: true, d: 7, f: 0.38 },
+  { n: 'Sneha Kulkarni', t: '09:20', late: false, d: 3, f: 0.29 }, { n: 'Vikas More', t: null }, { n: 'Neha Desai', t: null, leave: true },
+];
+const pending = [
+  { who: 'Sneha Kulkarni', what: 'Customer visit', det: 'Tata Motors, Chakan', st: 'pending', kind: 'v' },
+  { who: 'Amit Joshi', what: 'Half day (2nd half)', det: 'Bank work', st: 'pending', kind: 'l' },
+];
+
+// ---------- switch ----------
+$('sE').onclick = () => { $('emp').classList.remove('hidden'); $('adm').classList.add('hidden'); $('sE').classList.add('active'); $('sA').classList.remove('active'); };
+$('sA').onclick = () => { $('adm').classList.remove('hidden'); $('emp').classList.add('hidden'); $('sA').classList.add('active'); $('sE').classList.remove('active'); renderDash(); };
+
+// ---------- employee ----------
+function radar() {
+  const d = +$('dist').value, a = +$('acc').value, scale = 100 / 60; // 60 m fills the half-width
+  const inside = d <= cfg.radius && a <= cfg.acc;
+  $('radar').innerHTML = `
+    <circle cx="0" cy="0" r="${cfg.radius * scale}" fill="rgba(215,166,87,.3)" stroke="#d7a657" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="2.5" fill="#d7a657"/><text x="0" y="-${cfg.radius * scale + 5}" text-anchor="middle" font-size="7" fill="currentColor">${cfg.radius} m zone</text>
+    <circle cx="${d * scale}" cy="0" r="${a * scale}" fill="rgba(21,101,192,.15)" stroke="rgba(21,101,192,.5)" stroke-dasharray="2 2"/>
+    <circle cx="${d * scale}" cy="0" r="4.5" fill="#1565c0" stroke="#fff" stroke-width="1.5"/>`;
+  const z = $('zone'); z.className = 'tag';
+  if (a > cfg.acc) { z.textContent = 'Weak GPS'; z.classList.add('bad'); }
+  else if (inside) { z.textContent = 'In office zone'; z.classList.add('ok'); }
+  else { z.textContent = 'Outside zone'; z.classList.add('bad'); }
+  $('zinfo').textContent = `${d} m away · accuracy ±${a} m`;
+  $('dv').textContent = d + ' m'; $('av').textContent = a + ' m';
+}
+['dist', 'acc'].forEach((id) => ($(id).oninput = radar));
+
+function mainBtn() {
+  $('main').textContent = !st.in ? 'Check in' : st.out ? 'Day complete' : 'Check out';
+  $('main').disabled = !!st.out;
+  $('tIn').textContent = st.in || '--:--'; $('tOut').textContent = st.out || '--:--';
+}
+
+$('main').onclick = async () => {
+  const d = +$('dist').value, a = +$('acc').value;
+  // Same checks, in the same order, as the real server function.
+  if (a > cfg.acc) return toast(`GPS accuracy is ${a} m; ${cfg.acc} m or better is needed. Step outside or near a window and try again.`);
+  if (d > cfg.radius) return toast(`You are ${d} m from the office. You must be within ${cfg.radius} m.`);
+  toast('Opening camera for your selfie...');
+  $('main').disabled = true;
+  await new Promise((r) => setTimeout(r, 1400));
+  if (!st.in) {
+    st.in = hhmm();
+    const [h, m] = cfg.start.split(':').map(Number), now = new Date();
+    st.late = now.getHours() * 60 + now.getMinutes() > h * 60 + m + cfg.grace;
+    toast(st.late ? 'Checked in (marked late)' : 'Checked in. Have a good day!');
+  } else { st.out = hhmm(); toast('Checked out. See you tomorrow!'); }
+  mainBtn(); renderDash();
+};
+
+const leaves = [];
+$('ls').onclick = () => {
+  if (!$('ld').value || !$('lr').value.trim()) return toast('Pick a date and enter a reason.');
+  leaves.unshift({ d: $('ld').value, t: $('lt').selectedOptions[0].textContent, r: $('lr').value.trim() });
+  pending.unshift({ who: 'Rahul Sharma', what: $('lt').selectedOptions[0].textContent, det: $('lr').value.trim(), st: 'pending', kind: 'l' });
+  $('lr').value = ''; renderLeaves(); renderDash(); toast('Leave request sent.');
+};
+function renderLeaves() {
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  $('ll').innerHTML = leaves.map((l) => `<div class="item"><span>${esc(l.d)} · ${esc(l.t)}<br><span class="muted">${esc(l.r)}</span></span><span class="tag">Pending</span></div>`).join('');
+}
+
+// ---------- admin ----------
+$('a2n').onclick = () => { $('a2a').classList.add('hidden'); $('a2b').classList.remove('hidden'); $('code').focus(); };
+$('a2v').onclick = () => {
+  if (!/^\d{6}$/.test($('code').value)) return ($('a2e').textContent = 'Invalid code. Try again.');
+  $('a2').classList.add('hidden'); $('adash').classList.remove('hidden'); renderDash();
+};
+$('atabs').onclick = (e) => {
+  const t = e.target.dataset.t; if (!t) return;
+  document.querySelectorAll('#atabs button').forEach((b) => b.classList.toggle('active', b === e.target));
+  ['d', 'p', 'e', 's'].forEach((x) => $(x).classList.toggle('hidden', x !== t));
+};
+let c1, c2;
+function renderDash() {
+  if ($('adash').classList.contains('hidden')) return;
+  const rows = [...staff.filter((s) => s.t), ...(st.in ? [{ n: 'Rahul Sharma', t: st.in, late: st.late, d: +$('dist').value, f: 0.33, out: st.out }] : [])];
+  const absent = staff.filter((s) => !s.t && !s.leave), late = rows.filter((r) => r.late);
+  $('d').innerHTML = `<div class="grid">
+    <div class="card"><div class="muted">Present today</div><div class="stat">${rows.length} <span class="muted">/ 6</span></div></div>
+    <div class="card"><div class="muted">Late today</div><div class="stat">${late.length}</div><div class="chips">${late.map((r) => `<span class="tag bad">${r.n}</span>`).join('')}</div></div>
+    <div class="card"><div class="muted">Absent</div><div class="stat">${absent.length}</div><div class="chips">${absent.map((r) => `<span class="tag bad">${r.n}</span>`).join('')}</div></div></div>
+    <div class="grid"><div class="card"><h3>Last 7 days</h3><canvas id="c1" height="190"></canvas></div><div class="card"><h3>Today</h3><canvas id="c2" height="190"></canvas></div></div>
+    <div class="card"><h3>Today</h3><table><thead><tr><th>Name</th><th>In</th><th>Out</th><th>Status</th><th>From office</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td>${r.n}</td><td>${r.t}</td><td>${r.out || '--'}</td><td>${r.late ? '<span class="tag bad">Late</span>' : '<span class="tag ok">On time</span>'}</td><td>${r.d} m</td></tr>`).join('')}</tbody></table></div>`;
+  const cs = getComputedStyle(document.documentElement); Chart.defaults.color = cs.getPropertyValue('--text').trim();
+  const grid = cs.getPropertyValue('--line').trim();
+  c1?.destroy(); c2?.destroy();
+  c1 = new Chart($('c1'), { type: 'bar', data: { labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].slice(0, 7), datasets: [
+    { label: 'On time', data: [5, 4, 5, 3, 4, 2, 0], backgroundColor: '#6fd6a0' }, { label: 'Late', data: [0, 1, 0, 2, 1, 0, 0], backgroundColor: '#d7a657' }] },
+    options: { scales: { x: { stacked: true, grid: { color: grid } }, y: { stacked: true, beginAtZero: true, ticks: { precision: 0 }, grid: { color: grid } } } } });
+  c2 = new Chart($('c2'), { type: 'doughnut', data: { labels: ['On time', 'Late', 'On leave', 'Absent'], datasets: [{ data: [rows.length - late.length, late.length, 1, absent.length], backgroundColor: ['#6fd6a0', '#d7a657', '#6aa6e8', '#ff8f80'], borderWidth: 0 }] } });
+  renderApprovals(); renderEmp(); renderSet();
+}
+function renderApprovals() {
+  $('p').innerHTML = `<div class="card"><h3>Pending approvals</h3><table><thead><tr><th>Employee</th><th>Type</th><th>Details</th><th>Action</th></tr></thead><tbody>
+    ${pending.map((p, i) => `<tr><td>${p.who}</td><td>${p.what}</td><td>${p.det.replace(/[<>&]/g, '')}</td><td>${p.st === 'pending'
+      ? `<button class="primary" style="padding:6px 12px;width:auto" data-a="approved" data-i="${i}">Approve</button> <button data-a="rejected" data-i="${i}">Reject</button>`
+      : `<span class="tag ${p.st === 'approved' ? 'ok' : 'bad'}">${p.st}</span>`}</td></tr>`).join('')}</tbody></table></div>`;
+}
+$('p').onclick = (e) => { const b = e.target.closest('[data-a]'); if (!b) return; pending[+b.dataset.i].st = b.dataset.a; renderApprovals(); };
+function renderEmp() {
+  $('e').innerHTML = `<div class="card"><h3>Add employee</h3><div class="row"><input id="en" placeholder="Full name"><input placeholder="Employee ID"></div>
+    <div class="row"><input placeholder="Email"><input placeholder="Temporary password"></div>
+    <div class="row"><button type="button" id="ph">Take employee's photo</button><span id="phs" class="muted">No photo yet</span></div>
+    <button class="primary" style="max-width:240px" id="ae">Add employee</button></div>
+    <div class="card"><table><thead><tr><th>Name</th><th>Device</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+    ${['Rahul Sharma', ...staff.map((s) => s.n)].map((n) => `<tr><td>${n}</td><td>Bound</td><td>Active</td><td><button>Reset device</button> <button>Re-take photo</button> <button>Disable</button></td></tr>`).join('')}</tbody></table></div>`;
+  $('ph').onclick = () => { $('phs').textContent = 'Photo captured'; };
+  $('ae').onclick = () => toast('Demo only: in the real app the employee is created with their photo.');
+}
+function renderSet() {
+  if ($('s').dataset.r) return; $('s').dataset.r = 1;
+  $('s').innerHTML = `<div class="card"><h3>Office settings</h3>
+    <div class="row"><label class="muted">Latitude <input value="18.646972" readonly></label><label class="muted">Longitude <input value="73.784528" readonly></label></div>
+    <div class="row"><label class="muted">Allowed radius (m) <input id="sr" value="${cfg.radius}"></label><label class="muted">Max GPS error (m) <input id="sa" value="${cfg.acc}"></label></div>
+    <div class="row"><label class="muted">Start time <input type="time" value="${cfg.start}" id="ss"></label><label class="muted">Grace (min) <input id="sg" value="${cfg.grace}"></label>
+    <button class="primary" id="sv" style="padding:12px">Save settings</button></div><div class="muted">Try changing the radius, save, then switch to the Employee view.</div></div>`;
+  $('sv').onclick = () => { cfg.radius = +$('sr').value || 10; cfg.acc = +$('sa').value || 15; cfg.start = $('ss').value; cfg.grace = +$('sg').value || 0; radar(); toast('Saved. The employee view now uses these values.'); };
+}
+radar(); mainBtn();
+</script>
+</body>
+</html>

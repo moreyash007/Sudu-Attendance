@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SUDU Attendance Admin</title>
+<script src="../theme.js"></script>
+<link rel="stylesheet" href="../glass.css">
+</head>
+<body class="admin">
+
+<div id="loginBox" class="card center-box hidden">
+  <img class="logo big" src="../logo.png" alt="SUDU Logistics">
+  <h2>Admin sign in</h2>
+  <div id="step1">
+    <input id="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="primary" id="loginBtn">Continue</button>
+  </div>
+  <div id="step2" class="hidden">
+    <p class="muted">Open your authenticator app and enter the 6-digit code.</p>
+    <input id="mfaCode" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code">
+    <button class="primary" id="mfaBtn">Verify</button>
+  </div>
+  <div id="enroll" class="hidden">
+    <p class="muted">First sign-in: set up two-step verification. Scan this QR code with Google Authenticator or Microsoft Authenticator.</p>
+    <div id="qr" class="qr"></div>
+    <p class="muted">Or type this key: <code id="secretKey"></code></p>
+    <input id="enrollCode" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="off">
+    <button class="primary" id="enrollBtn">Turn on two-step verification</button>
+  </div>
+  <div id="msg" class="err" role="alert"></div>
+  <div class="tools" style="justify-content:center"><button id="themeBtn1" type="button">&#9680; Theme</button></div>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="brand"><img class="logo" src="../logo.png" alt="SUDU Logistics"><span>Attendance &middot; Admin</span></div>
+    <div class="tools"><button id="themeBtn" type="button">&#9680;</button><button id="logout" type="button">Sign out</button></div>
+  </header>
+  <main>
+    <nav id="tabs">
+      <button data-tab="dash" class="active">Dashboard</button>
+      <button data-tab="approvals">Approvals</button>
+      <button data-tab="employees">Employees</button>
+      <button data-tab="reports">Reports</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <section id="dash"></section>
+    <section id="approvals" class="hidden"></section>
+    <section id="employees" class="hidden"></section>
+    <section id="reports" class="card hidden"></section>
+    <section id="settings" class="card hidden"></section>
+  </main>
+</div>
+
+<dialog id="photoDlg"><img id="photoImg" alt="Photo"><button id="photoClose" style="margin-top:10px">Close</button></dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="../config.js"></script>
+<script src="../api.js"></script>
+<script src="../camera.js"></script>
+<script>
+const { sb, emailOf, call, blobToBase64 } = Sudu;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const istDate = (d = new Date()) => d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const istMinutes = () => { const [h, m] = new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false }).split(':').map(Number); return h * 60 + m; };
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }) : '--';
+const hours = (a, b) => a && b ? ((new Date(b) - new Date(a)) / 3600000).toFixed(2) : '';
+const TYPE_LABEL = { out_duty: 'Out duty', customer_visit: 'Customer visit', custom_visit: 'Custom visit' };
+const LEAVE_LABEL = { full: 'Full day', half_first: 'Half day (1st half)', half_second: 'Half day (2nd half)' };
+
+const setMsg = (m) => ($('msg').textContent = m || '');
+const showStep = (id) => ['step1', 'step2', 'enroll'].forEach((s) => $(s).classList.toggle('hidden', s !== id));
+$('themeBtn').onclick = $('themeBtn1').onclick = () => window.toggleTheme();
+
+// ---------- sign-in: password, then the authenticator code ----------
+let factorId = null;
+let started = false;
+
+function showLoginBox(step) { $('loginBox').classList.remove('hidden'); $('app').classList.add('hidden'); showStep(step || 'step1'); }
+
+// Runs after the password step (and when an existing session is resumed): decides what is still needed.
+async function afterPassword(userId) {
+  const { data: prof } = await sb.from('profiles').select('role, active, name').eq('id', userId).maybeSingle();
+  if (!prof || !prof.active || prof.role !== 'admin') {
+    await sb.auth.signOut(); showLoginBox('step1'); return setMsg('This account is not an admin.');
+  }
+  const { data: aal } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (aal.currentLevel === 'aal2') return enter();
+
+  const { data: factors } = await sb.auth.mfa.listFactors();
+  const verified = (factors.totp || [])[0];
+  if (verified) { factorId = verified.id; showLoginBox('step2'); $('mfaCode').focus(); return; }
+
+  // First sign-in: set up the authenticator app. Remove any half-finished earlier attempt first.
+  for (const f of (factors.all || []).filter((x) => x.factor_type === 'totp' && x.status !== 'verified')) {
+    await sb.auth.mfa.unenroll({ factorId: f.id });
+  }
+  const { data, error } = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Authenticator ' + Date.now() });
+  if (error) { showLoginBox('step1'); return setMsg('Could not start two-step setup: ' + error.message); }
+  factorId = data.id;
+  $('qr').innerHTML = ''; const img = new Image(); img.src = data.totp.qr_code; img.alt = 'QR code'; img.width = 200; $('qr').appendChild(img);
+  $('secretKey').textContent = data.totp.secret;
+  showLoginBox('enroll'); $('enrollCode').focus();
+}
+
+async function verifyCode(inputId) {
+  setMsg('');
+  try {
+    const { data: ch, error: e1 } = await sb.auth.mfa.challenge({ factorId });
+    if (e1) throw e1;
+    const { error: e2 } = await sb.auth.mfa.verify({ factorId, challengeId: ch.id, code: $(inputId).value.trim() });
+    if (e2) throw e2;
+    $(inputId).value = '';
+    await enter();
+  } catch (e) { setMsg('Invalid code. Try again.'); }
+}
+
+$('loginBtn').onclick = async () => {
+  setMsg('');
+  const username = $('username').value.trim();
+  if (!username || !$('password').value) return;
+  const { data, error } = await sb.auth.signInWithPassword({ email: emailOf(username), password: $('password').value });
+  if (error) return setMsg(/invalid|credentials/i.test(error.message) ? 'Wrong username or password.' : error.message);
+  $('password').value = '';
+  try { await afterPassword(data.user.id); } catch (e) { setMsg(e.message); }
+};
+$('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+$('mfaBtn').onclick = () => verifyCode('mfaCode');
+$('enrollBtn').onclick = () => verifyCode('enrollCode');
+$('mfaCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('mfaBtn').click(); });
+$('enrollCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('enrollBtn').click(); });
+$('logout').onclick = async () => { await sb.auth.signOut(); location.reload(); };
+
+// ---------- shared UI ----------
+$('tabs').onclick = (e) => {
+  const tab = e.target.dataset.tab; if (!tab) return;
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b === e.target));
+  ['dash', 'approvals', 'employees', 'reports', 'settings'].forEach((t) => $(t).classList.toggle('hidden', t !== tab));
+};
+
+const table = (headers, rows) =>
+  `<table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('') || `<tr><td colspan="${headers.length}">Nothing here.</td></tr>`}</tbody></table>`;
+const btn = (label, attrs, primary) =>
+  `<button ${primary ? 'class="primary" style="padding:6px 12px"' : ''} ${Object.entries(attrs).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ')}>${label}</button>`;
+
+async function showPhoto(path) {
+  try {
+    const { data, error } = await sb.storage.from('photos').download(path);
+    if (error) throw error;
+    $('photoImg').src = URL.createObjectURL(data);
+    $('photoDlg').showModal();
+  } catch (e) { alert('Could not load the photo: ' + e.message); }
+}
+$('photoClose').onclick = () => { $('photoDlg').close(); URL.revokeObjectURL($('photoImg').src); $('photoImg').removeAttribute('src'); };
+
+// Row buttons use data-* attributes; one delegated handler runs them.
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const { act, id, col, status, to, name } = b.dataset;
+  try {
+    if (act === 'photo') return showPhoto(id);
+    if (act === 'delete') {
+      if (!confirm(`Permanently delete ${name}?\n\nTheir login, attendance history, leave, visits and photos will be removed and cannot be recovered.\nTo keep the history, use Disable instead.`)) return;
+      await call('admin-delete-user', { id });
+    } else if (act === 'review') await call('admin-review', { table: col, id, status });
+    else if (act === 'resetDevice') await call('admin-update-user', { id, resetDevice: true });
+    else if (act === 'active') await call('admin-update-user', { id, active: to === 'true' });
+    else if (act === 'reface') await reenrol(id);
+    await loadAll();
+  } catch (err) { alert(err.message); }
+});
+
+// ---------- data ----------
+const S = { cfg: { startTime: '09:30', graceMin: 15 }, users: [], att: [], leaves: [], visits: [], pendingVisits: [], pendingLeaves: [] };
+let barChart = null, pieChart = null;
+
+async function q(promise) { const { data, error } = await promise; if (error) throw new Error(error.message); return data; }
+const withProfile = (table) => sb.from(table).select('*, profile:profiles(name, emp_id)');
+const who = (r) => ({ uid: r.user_id, name: r.profile && r.profile.name, empId: r.profile && r.profile.emp_id });
+const nAtt = (r) => ({ ...who(r), id: r.id, date: r.date, late: r.late, test: r.test, inTime: r.in_time, outTime: r.out_time, inLoc: { distance: r.in_dist }, inSelfie: r.in_photo, outSelfie: r.out_photo });
+const nVisit = (r) => ({ ...who(r), id: r.id, date: r.date, type: r.type, customer: r.customer, reason: r.reason, time: r.time, loc: { lat: r.lat, lng: r.lng }, selfie: r.photo, status: r.status });
+const nLeave = (r) => ({ ...who(r), id: r.id, type: r.type, from: r.from_date, to: r.to_date, reason: r.reason, status: r.status });
+const nUser = (r) => ({ id: r.id, name: r.name, empId: r.emp_id, username: r.username, role: r.role, active: r.active, deviceBound: !!r.device_id, photo: r.enrol_photo, isAdmin: r.role === 'admin' });
+
+async function loadAll() {
+  const today = istDate(), since = istDate(new Date(Date.now() - 13 * 86400000));
+  const [cfg, users, att, leaves, visits, pv, pl] = await Promise.all([
+    q(sb.from('settings').select('value').eq('key', 'office').maybeSingle()),
+    q(sb.from('profiles').select('*').order('role').order('name')),
+    q(withProfile('attendance').gte('date', since).lte('date', today).order('date')),
+    q(withProfile('leaves').eq('status', 'approved')),
+    q(withProfile('visits').eq('date', today)),
+    q(withProfile('visits').eq('status', 'pending').order('time', { ascending: false })),
+    q(withProfile('leaves').eq('status', 'pending').order('created_at', { ascending: false })),
+  ]);
+  Object.assign(S, {
+    cfg: { lat: 18.646972, lng: 73.784528, radius: 10, maxAccuracy: 15, startTime: '09:30', graceMin: 15, ...((cfg && cfg.value) || {}) },
+    users: users.map(nUser), att: att.map(nAtt), leaves: leaves.map(nLeave), visits: visits.map(nVisit),
+    pendingVisits: pv.map(nVisit), pendingLeaves: pl.map(nLeave),
+  });
+  renderDash(); renderApprovals(); renderEmployees(); fillSettings();
+}
+
+function chartColors() {
+  const cs = getComputedStyle(document.documentElement);
+  return { text: cs.getPropertyValue('--text').trim(), grid: cs.getPropertyValue('--line').trim() };
+}
+
+function renderDash() {
+  const today = istDate();
+  const [h, m] = String(S.cfg.startTime || '09:30').split(':').map(Number);
+  const afterStart = istMinutes() > h * 60 + m + Number(S.cfg.graceMin || 0);
+  const todayAtt = S.att.filter((a) => a.date === today);
+  const staff = S.users.filter((u) => !u.isAdmin && u.active);
+  const present = new Set(todayAtt.map((a) => a.uid));
+  const onLeave = new Set(S.leaves.filter((l) => l.type === 'full' && l.from <= today && l.to >= today).map((l) => l.uid));
+  const onVisit = new Set(S.visits.filter((v) => v.status === 'approved').map((v) => v.uid));
+  const absent = afterStart ? staff.filter((u) => !present.has(u.id) && !onLeave.has(u.id) && !onVisit.has(u.id)) : [];
+  const late = todayAtt.filter((a) => a.late);
+  const onTime = todayAtt.length - late.length;
+
+  const days = [...Array(14)].map((_, i) => istDate(new Date(Date.now() - (13 - i) * 86400000)));
+  const byDay = (d, isLate) => S.att.filter((a) => a.date === d && a.late === isLate).length;
+
+  const rows = todayAtt.map((a) => `<tr>
+    <td>${esc(a.name)}</td><td>${esc(a.empId)}</td><td>${fmtTime(a.inTime)}</td><td>${fmtTime(a.outTime)}</td>
+    <td>${hours(a.inTime, a.outTime)}</td>
+    <td>${a.late ? '<span class="tag bad">Late</span>' : '<span class="tag ok">On time</span>'}${a.test ? ' <span class="tag">Test</span>' : ''}</td>
+    <td>${a.inLoc.distance != null ? a.inLoc.distance + ' m' : '--'}</td>
+    <td>${a.inSelfie ? btn('In', { act: 'photo', id: a.inSelfie }) : ''} ${a.outSelfie ? btn('Out', { act: 'photo', id: a.outSelfie }) : ''}</td></tr>`);
+
+  const chips = (list, cls) => list.length ? `<div class="chips">${list.map((x) => `<span class="tag ${cls}">${esc(x.name)}</span>`).join('')}</div>` : '<span class="muted">None</span>';
+
+  $('dash').innerHTML = `
+    <div class="grid">
+      <div class="card"><div class="muted">Present today</div><div class="stat">${todayAtt.length} <span class="muted">/ ${staff.length}</span></div></div>
+      <div class="card"><div class="muted">Late today</div><div class="stat">${late.length}</div>${chips(late, 'bad')}</div>
+      <div class="card"><div class="muted">Absent ${afterStart ? '' : '(shown after start time + grace)'}</div><div class="stat">${absent.length}</div>${chips(absent, 'bad')}</div>
+    </div>
+    <div class="grid">
+      <div class="card"><h3>Last 14 days</h3><canvas id="barC" height="200"></canvas></div>
+      <div class="card"><h3>Today</h3><canvas id="pieC" height="200"></canvas></div>
+    </div>
+    <div class="card"><h3>Today (${today})</h3>${table(['Name', 'Emp ID', 'In', 'Out', 'Hours', 'Status', 'From office', 'Photos'], rows)}</div>`;
+
+  const c = chartColors();
+  Chart.defaults.color = c.text;
+  if (barChart) barChart.destroy();
+  if (pieChart) pieChart.destroy();
+  barChart = new Chart($('barC'), {
+    type: 'bar',
+    data: { labels: days.map((d) => d.slice(5)), datasets: [
+      { label: 'On time', data: days.map((d) => byDay(d, false)), backgroundColor: '#6fd6a0' },
+      { label: 'Late', data: days.map((d) => byDay(d, true)), backgroundColor: '#d7a657' },
+    ] },
+    options: { scales: { x: { stacked: true, grid: { color: c.grid } }, y: { stacked: true, beginAtZero: true, ticks: { precision: 0 }, grid: { color: c.grid } } } },
+  });
+  pieChart = new Chart($('pieC'), {
+    type: 'doughnut',
+    data: { labels: ['On time', 'Late', 'On leave / visit', 'Absent'], datasets: [{
+      data: [onTime, late.length, staff.filter((u) => onLeave.has(u.id) || onVisit.has(u.id)).length, absent.length],
+      backgroundColor: ['#6fd6a0', '#d7a657', '#6aa6e8', '#ff8f80'], borderWidth: 0,
+    }] },
+  });
+}
+window.addEventListener('themechange', () => started && renderDash());
+
+async function enter() {
+  setMsg('');
+  $('loginBox').classList.add('hidden'); $('app').classList.remove('hidden');
+  if (started) return;
+  started = true;
+  renderReports();
+  try { await loadAll(); } catch (e) { alert(e.message); }
+  setInterval(() => loadAll().catch(() => {}), 30000);
+}
+
+// ---------- approvals ----------
+function renderApprovals() {
+  const vRows = S.pendingVisits.map((v) => `<tr><td>${esc(v.date)}</td><td>${esc(v.name)}</td><td>${TYPE_LABEL[v.type] || esc(v.type)}</td>
+    <td>${esc(v.customer)}</td><td>${esc(v.reason)}</td>
+    <td>${v.loc.lat != null ? `<a href="https://www.google.com/maps?q=${Number(v.loc.lat)},${Number(v.loc.lng)}" target="_blank" rel="noopener noreferrer">Map</a>` : ''}
+        ${v.selfie ? btn('Selfie', { act: 'photo', id: v.selfie }) : ''}</td>
+    <td>${btn('Approve', { act: 'review', col: 'visits', id: v.id, status: 'approved' }, true)} ${btn('Reject', { act: 'review', col: 'visits', id: v.id, status: 'rejected' })}</td></tr>`);
+  const lRows = S.pendingLeaves.map((l) => `<tr><td>${esc(l.name)}</td><td>${LEAVE_LABEL[l.type] || esc(l.type)}</td><td>${esc(l.from)}${l.to !== l.from ? ' to ' + esc(l.to) : ''}</td><td>${esc(l.reason)}</td>
+    <td>${btn('Approve', { act: 'review', col: 'leaves', id: l.id, status: 'approved' }, true)} ${btn('Reject', { act: 'review', col: 'leaves', id: l.id, status: 'rejected' })}</td></tr>`);
+  $('approvals').innerHTML = `<div class="card"><h3>Pending visits / out duty</h3>${table(['Date', 'Employee', 'Type', 'Customer', 'Reason', 'Proof', 'Action'], vRows)}</div>
+    <div class="card"><h3>Pending leave</h3>${table(['Employee', 'Type', 'Dates', 'Reason', 'Action'], lRows)}</div>`;
+}
+
+// ---------- employees ----------
+let newFace = null; // { blob } captured for the employee being added
+
+function renderEmployees() {
+  if (!$('employees').dataset.ready) {
+    $('employees').dataset.ready = '1';
+    $('employees').innerHTML = `<div class="card"><h3>Add employee</h3>
+      <div class="row"><input id="n" placeholder="Full name"><input id="i" placeholder="Employee ID"></div>
+      <div class="row"><input id="u" placeholder="Username (letters, numbers, . _ -)" autocapitalize="none"><input id="p" type="text" placeholder="Temporary password (8+ characters)"></div>
+      <div class="row"><button id="shot" type="button">Take employee's photo</button><span id="shotState" class="muted">No photo yet</span></div>
+      <button class="primary" id="addEmp" style="max-width:240px">Add employee</button><div id="empMsg" class="muted" style="margin-top:8px"></div></div>
+      <div class="card" id="empTable"></div>`;
+    $('shot').onclick = async () => {
+      try { newFace = await Camera.capture(); $('shotState').textContent = 'Photo captured'; }
+      catch (e) { $('empMsg').textContent = e.message; }
+    };
+    $('addEmp').onclick = addEmployee;
+  }
+  const rows = S.users.map((u) => `<tr>
+    <td>${esc(u.name)}</td><td>${esc(u.empId)}</td><td>${esc(u.username)}</td>
+    <td>${u.isAdmin ? 'Admin' : u.deviceBound ? 'Bound' : 'Not set'}</td><td>${u.active ? 'Active' : 'Disabled'}</td>
+    <td>${u.isAdmin ? '' : `${btn('Reset device', { act: 'resetDevice', id: u.id })}
+        ${btn('Re-take photo', { act: 'reface', id: u.id })}
+        ${u.photo ? btn('Photo', { act: 'photo', id: u.photo }) : ''}
+        ${btn(u.active ? 'Disable' : 'Enable', { act: 'active', id: u.id, to: String(!u.active) })}
+        ${btn('Delete', { act: 'delete', id: u.id, name: u.name })}`}</td></tr>`);
+  $('empTable').innerHTML = table(['Name', 'Emp ID', 'Username', 'Device', 'Status', 'Actions'], rows);
+}
+
+async function addEmployee() {
+  const msg = $('empMsg');
+  const v = { name: $('n').value.trim(), empId: $('i').value.trim(), username: $('u').value.trim().toLowerCase(), password: $('p').value };
+  if (!v.name || !v.username || v.password.length < 8) { msg.textContent = 'Enter name, username and a password of 8+ characters.'; return; }
+  if (!newFace) { msg.textContent = "Take the employee's photo first."; return; }
+  $('addEmp').disabled = true; msg.textContent = 'Adding...';
+  try {
+    await call('admin-create-user', { ...v, photo: await blobToBase64(newFace.blob) });
+    msg.textContent = 'Employee added.';
+    ['n', 'i', 'u', 'p'].forEach((id) => ($(id).value = ''));
+    newFace = null; $('shotState').textContent = 'No photo yet';
+    await loadAll();
+  } catch (e) { msg.textContent = e.message; }
+  $('addEmp').disabled = false;
+}
+
+async function reenrol(id) {
+  const shot = await Camera.capture();
+  await call('admin-update-user', { id, photo: await blobToBase64(shot.blob) });
+  alert('Photo updated.');
+}
+
+// ---------- reports ----------
+function renderReports() {
+  const today = istDate();
+  $('reports').innerHTML = `<h3>Export attendance</h3><div class="row">
+    <label class="muted">From <input id="rf" type="date" value="${today.slice(0, 8)}01"></label>
+    <label class="muted">To <input id="rt" type="date" value="${today}"></label>
+    <button class="primary" id="exp" style="padding:12px">Download CSV (opens in Excel)</button></div>`;
+  $('exp').onclick = async () => {
+    const from = $('rf').value, to = $('rt').value;
+    try {
+      const [att, vis, lv] = await Promise.all([
+        q(withProfile('attendance').gte('date', from).lte('date', to).order('date')),
+        q(withProfile('visits').gte('date', from).lte('date', to).order('date')),
+        q(withProfile('leaves').eq('status', 'approved')),
+      ]);
+      // Prefix formula-like cells so Excel does not execute text typed by employees.
+      const cell = (x) => { let s = String(x ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return `"${s.replace(/"/g, '""')}"`; };
+      const lines = [['Date', 'Name', 'Emp ID', 'Type', 'In', 'Out', 'Hours', 'Late', 'Customer', 'Reason', 'Status'].join(',')];
+      att.map(nAtt).forEach((a) => lines.push([a.date, a.name, a.empId, a.test ? 'Office (test)' : 'Office', fmtTime(a.inTime), fmtTime(a.outTime), hours(a.inTime, a.outTime), a.late ? 'Yes' : 'No', '', '', 'Present'].map(cell).join(',')));
+      vis.map(nVisit).forEach((x) => lines.push([x.date, x.name, x.empId, TYPE_LABEL[x.type] || x.type, fmtTime(x.time), '', '', '', x.customer, x.reason, x.status].map(cell).join(',')));
+      lv.map(nLeave).forEach((l) => { if (l.to >= from && l.from <= to) lines.push([`${l.from} to ${l.to}`, l.name, l.empId, 'Leave: ' + (LEAVE_LABEL[l.type] || l.type), '', '', '', '', '', l.reason, l.status].map(cell).join(',')); });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], { type: 'text/csv' }));
+      a.download = `attendance_${from}_${to}.csv`; a.click();
+    } catch (e) { alert(e.message); }
+  };
+}
+
+// ---------- settings ----------
+function fillSettings() {
+  const s = S.cfg;
+  if ($('settings').dataset.ready) return;
+  $('settings').dataset.ready = '1';
+  $('settings').innerHTML = `<h3>Office settings</h3>
+    <div class="row"><label class="muted">Latitude <input id="la" value="${s.lat}"></label>
+      <label class="muted">Longitude <input id="lo" value="${s.lng}"></label>
+      <button id="here" type="button">Use my current location</button></div>
+    <div class="row"><label class="muted">Allowed radius (m) <input id="ra" value="${s.radius}"></label>
+      <label class="muted">Max GPS error (m) <input id="ac" value="${s.maxAccuracy}"></label></div>
+    <div class="row"><label class="muted">Start time <input id="st" type="time" value="${s.startTime}"></label>
+      <label class="muted">Grace (minutes) <input id="gr" value="${s.graceMin}"></label>
+      <button class="primary" id="save" style="padding:12px">Save settings</button></div><div id="saved" class="muted"></div>`;
+  $('here').onclick = () => navigator.geolocation.getCurrentPosition(
+    (p) => { $('la').value = p.coords.latitude.toFixed(6); $('lo').value = p.coords.longitude.toFixed(6); },
+    () => ($('saved').textContent = 'Could not read your location.'), { enableHighAccuracy: true });
+  $('save').onclick = async () => {
+    try {
+      await call('admin-settings', {
+        lat: +$('la').value, lng: +$('lo').value, radius: +$('ra').value, maxAccuracy: +$('ac').value,
+        graceMin: +$('gr').value, startTime: $('st').value,
+      });
+      $('saved').textContent = 'Saved.'; await loadAll();
+    } catch (e) { $('saved').textContent = e.message; }
+  };
+}
+
+// Resume an existing session, otherwise show the sign-in box.
+(async () => {
+  try {
+    const { data } = await sb.auth.getSession();
+    if (data.session) return await afterPassword(data.session.user.id);
+  } catch (e) {}
+  showLoginBox('step1');
+})();
+</script>
+</body>
+</html>

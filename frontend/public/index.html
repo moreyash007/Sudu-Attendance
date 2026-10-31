@@ -195,6 +195,21 @@ function initMap() {
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
   L.circle([office.lat, office.lng], { radius: office.radius, color: '#d7a657', fillColor: '#d7a657', fillOpacity: 0.3 }).addTo(map);
   L.marker([office.lat, office.lng]).addTo(map).bindTooltip('SUDU Logistics');
+  if (lastFix) { // redrawing after the admin moved the zone: put "you are here" straight back
+    const ll = [lastFix.lat, lastFix.lng];
+    meMarker = L.circleMarker(ll, { radius: 8, color: '#fff', weight: 2, fillColor: '#1565c0', fillOpacity: 1 }).addTo(map);
+    fitted = true;
+    map.fitBounds(L.latLngBounds([ll, [office.lat, office.lng]]).pad(0.5), { maxZoom: 19 });
+  }
+}
+
+// Loads the office settings the admin controls (zone, radius, GPS limit). Returns true if the zone changed.
+async function loadOffice() {
+  const next = { ...DEFAULT_OFFICE, ...(await call('config')) };
+  const changed = next.lat !== office.lat || next.lng !== office.lng || next.radius !== office.radius;
+  office = next;
+  $('devBanner').classList.toggle('hidden', !office.devMode);
+  return changed;
 }
 
 function renderZone() {
@@ -296,14 +311,16 @@ async function enter(userId) {
   me = prof;
   $('loginBox').classList.add('hidden'); $('app').classList.remove('hidden');
   $('who').textContent = prof.name;
-  try { office = { ...DEFAULT_OFFICE, ...(await call('config')) }; } catch (e) {}
-  $('devBanner').classList.toggle('hidden', !office.devMode);
+  try { await loadOffice(); } catch (e) {}
   initMap(); startWatch();
   await refresh();
   clearInterval(pollTimer); pollTimer = setInterval(() => refresh().catch(() => {}), 30000);
 }
 
 async function refresh() {
+  // Picks up changes the admin made in Settings (runs every 30 s and after each action).
+  try { if (await loadOffice()) initMap(); } catch (e) {}
+  renderZone();
   const uid = me.id;
   const [a, h, l] = await Promise.all([
     sb.from('attendance').select('*').eq('user_id', uid).eq('date', istToday()).maybeSingle(),

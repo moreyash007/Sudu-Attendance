@@ -1,5 +1,5 @@
-// End-to-end test of the Supabase backend: admin sign-in, authenticator step, face sign-in for employees (no
-// password), security rules, photo storage and the `api` Edge Function. Needs Node 20+ and no packages. Run it with scripts/test.ps1 (or see the README).
+// End-to-end test of the Supabase backend: sign-in, authenticator step, security rules, photo storage and the
+// `api` Edge Function. Needs Node 20+ and no packages. Run it with scripts/test.ps1 (or see the README).
 //   API_URL=http://127.0.0.1:55321 ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 import crypto from 'node:crypto';
 
@@ -20,13 +20,6 @@ nodeHttp.createServer((req, res) => {
   req.on('data', (d) => (data += d));
   req.on('end', () => { try { mails.push({ auth: req.headers.authorization, body: JSON.parse(data) }); } catch { /* ignore */ } res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"id":"test"}'); });
 }).listen(MAIL_PORT, '0.0.0.0');
-// Deterministic fake face descriptors (128 numbers). Different seeds are far apart (distance ~1.4, the server
-// accepts up to 0.5); near() is the same person seen again (distance ~0.07).
-function face(seed) {
-  let x = (seed * 2654435761) % 4294967296 || 1;
-  return Array.from({ length: 128 }, () => { x = (x * 1664525 + 1013904223) % 4294967296; return (x / 4294967296 - 0.5) * 0.3; });
-}
-const near = (d, eps = 0.012) => d.map((v, i) => v + (((i * 7919) % 13) / 6 - 1) * eps);
 const results = [];
 const check = (name, ok, extra = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  <- ' + extra}`); };
 const short = (v) => JSON.stringify(v)?.slice(0, 160);
@@ -64,15 +57,21 @@ const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' 
 async function waitForFunction() {
   for (let i = 0; i < 40; i++) {
     const r = await fetch(`${API_URL}/functions/v1/api/config`, { method: 'POST', headers: { apikey: ANON_KEY, Authorization: 'Bearer ' + ANON_KEY } }).catch(() => null);
-    if (r && r.status === 200) return true;
+    if (r && r.status === 401) return true;
     await new Promise((r2) => setTimeout(r2, 1500));
   }
   return false;
 }
 
+async function selfie(token, uid) {
+  const path = `selfies/${uid}/${Date.now()}-${Math.random().toString(16).slice(2, 8)}.jpg`;
+  const r = await upload(token, path, JPEG);
+  if (r.status >= 300) throw new Error('selfie upload failed: ' + short(r.data));
+  return path;
+}
+
 (async () => {
-  check('Edge Function is up (public config route answers)', await waitForFunction());
-  check('an anonymous call to an admin route is rejected (401)', (await fn(undefined, 'admin-settings', {})).status === 401);
+  check('Edge Function is up and rejects an anonymous call (401)', await waitForFunction());
 
   // ---------- first admin (what the README tells you to do once) ----------
   let r = await admin('POST', '/auth/v1/admin/users', { email: `${UA}@${DOMAIN}`, password: 'AdminPass-12345', email_confirm: true });
@@ -106,32 +105,25 @@ async function waitForFunction() {
 
   // ---------- admin creates employees ----------
   const b64 = JPEG.toString('base64');
-  const F1 = face(1), F2 = face(2), F3 = face(3);
-  const mk = (username, fd, extra = {}) => fn(A, 'admin-create-user', { name: 'Test ' + username, empId: 'E-' + username, username, photo: b64, faceDescriptor: fd, ...extra });
-  r = await mk(U1, F1); check('admin creates employee emp1 (photo + face, no password)', r.status === 200 && r.data.id, short(r.data));
+  const mk = (username, extra = {}) => fn(A, 'admin-create-user', { name: 'Test ' + username, empId: 'E-' + username, username, password: 'Employee-Pass-1', photo: b64, ...extra });
+  r = await mk(U1); check('admin creates employee emp1 (login + photo)', r.status === 200 && r.data.id, short(r.data));
   const emp1 = r.data.id;
-  check('duplicate username is 409', (await mk(U1, face(11))).status === 409);
-  check('employee needs a photo', (await mk('emp9', face(12), { photo: undefined })).status === 400);
-  check('employee needs a face descriptor', (await mk('emp8', undefined)).status === 400);
-  check('a malformed face descriptor is rejected', (await mk('emp7', [1, 2, 3])).status === 400 && (await mk('emp6', Array(128).fill('x'))).status === 400);
-  check('bad username rejected', (await mk('Bad Name!', face(13))).status === 400);
-  r = await mk('twin' + RUN, near(F1));
-  check('a face almost identical to another employee is refused', r.status === 409 && /too similar/.test(r.data.error), short(r.data));
-  check('a password-only admin session cannot create employees', (await fn(aal1, 'admin-create-user', { name: 'x', username: 'sneaky', photo: b64, faceDescriptor: face(14) })).status === 403);
-  r = await mk(U2, F2); const emp2 = r.data.id;
+  check('duplicate username is 409', (await mk(U1)).status === 409);
+  check('employee needs a photo', (await mk('emp9', { photo: undefined })).status === 400);
+  check('short password rejected', (await mk('emp8', { password: 'short' })).status === 400);
+  check('bad username rejected', (await mk('Bad Name!')).status === 400);
+  check('a password-only admin session cannot create employees', (await fn(aal1, 'admin-create-user', { name: 'x', username: 'sneaky', password: 'Employee-Pass-1', photo: b64 })).status === 403);
+  r = await mk(U2); const emp2 = r.data.id;
   check('admin creates employee emp2', r.status === 200);
-  // Employees have no password to type, but the account still has a login; give them a known one so the database
-  // security rules (which apply to a signed-in session) can still be tested.
-  for (const id of [emp1, emp2]) await fn(A, 'admin-update-user', { id, password: 'Employee-Pass-1' });
 
   const prof1 = (await rest(A, 'GET', `profiles?id=eq.${emp1}&select=*`)).data[0];
-  check('profile has role employee, an enrolment photo path and a face descriptor', prof1 && prof1.role === 'employee' && /^enroll\//.test(prof1.enrol_photo) && prof1.face_descriptor.length === 128, short(prof1).slice(0, 100));
+  check('profile has role employee and an enrolment photo path', prof1 && prof1.role === 'employee' && /^enroll\//.test(prof1.enrol_photo), short(prof1));
   const enrol = await download(A, prof1.enrol_photo);
   check('admin can view the enrolment photo (identical bytes)', enrol.status === 200 && Buffer.compare(enrol.data, JPEG) === 0, String(enrol.status));
 
   // ---------- employee: what they may and may not do ----------
   r = await login(U1, 'Employee-Pass-1'); const E1 = r.data.access_token;
-  check('database-level employee session works (used only to test the security rules)', r.status === 200 && E1);
+  check('employee sign-in works (username only)', r.status === 200 && E1);
   check('employee is refused on admin routes', (await fn(E1, 'admin-review', { table: 'visits', id: crypto.randomUUID(), status: 'approved' })).status === 403);
   check('employee sees only their own profile', (await rest(E1, 'GET', 'profiles?select=id')).data.length === 1);
   check('employee cannot write attendance directly', (await rest(E1, 'POST', 'attendance', { user_id: emp1, date: today })).status >= 400);
@@ -146,76 +138,43 @@ async function waitForFunction() {
   await admin('DELETE', `/auth/v1/admin/users/${stray.data.id}`);
   check('employee cannot sneak a file into the enroll folder', (await upload(E1, `enroll/${emp1}/me.jpg`, JPEG)).status >= 400);
 
-  // ---------- face sign-in (no password) ----------
-  const anon = (route, body, origin) => fn(undefined, route, body, origin); // no signed-in user: employees send only their face
-  r = await anon('face-login', { descriptor: F1 });
-  check('face sign-in recognises employee 1', r.status === 200 && r.data.user.id === emp1 && r.data.token, short(r.data));
-  const T1 = r.data.token;
-  r = await anon('face-login', { descriptor: near(F1) });
-  check('the same person seen again (small differences) is still recognised', r.status === 200 && r.data.user.id === emp1, short(r.data));
-  r = await anon('face-login', { descriptor: face(99) });
-  check('a stranger’s face is not recognised (401)', r.status === 401, short(r.data));
-  check('no face / malformed face is refused (400)', (await anon('face-login', {})).status === 400 && (await anon('face-login', { descriptor: [0, 1] })).status === 400);
-  r = await anon('face-login', { descriptor: F2 });
-  const T2 = r.data.token;
-  check('face sign-in recognises employee 2', r.status === 200 && r.data.user.id === emp2);
-  r = await anon('me', { token: T1 });
-  check('the token shows the employee’s own (empty) records', r.status === 200 && r.data.today === null && r.data.history.length === 0, short(r.data));
-  check('a missing, tampered or wrong-user token is refused', (await anon('me', {})).status === 401 && (await anon('me', { token: T1 + 'x' })).status === 401 &&
-    (await anon('me', { token: T1.replace(emp1, emp2) })).status === 401);
-  check('a face token is not an admin login', (await fn(T1, 'admin-settings', {})).status === 401 && (await fn(T1, 'admin-create-user', {})).status === 401);
-  check('anonymous visitors cannot read face data from the database', (await rest(undefined, 'GET', 'profiles?select=face_descriptor')).status >= 400);
-  check('a signed-in employee’s own row is the only one they can read', (await rest(E1, 'GET', 'profiles?select=id')).data.length === 1);
-
-  // two enrolled faces closer than the safety margin make a match ambiguous, so it is refused
-  const AM = face(31), AM2 = AM.slice(); AM2[0] += 0.46;
-  const am1 = (await mk('ama' + RUN, AM)).data.id, am2 = (await mk('amb' + RUN, AM2)).data.id;
-  check('two faces 0.46 apart can both be enrolled', am1 && am2);
-  const mid = AM.slice(); mid[0] += 0.23;
-  check('a face right between two employees is refused as ambiguous', (await anon('face-login', { descriptor: mid })).status === 401);
-  check('but each of them is still recognised on their own', (await anon('face-login', { descriptor: AM })).data.user.id === am1 && (await anon('face-login', { descriptor: AM2 })).data.user.id === am2);
-  await fn(A, 'admin-delete-user', { id: am1 }); await fn(A, 'admin-delete-user', { id: am2 });
-
   // ---------- check-in / check-out in LOCAL TEST mode (origin = localhost) ----------
   const D1 = 'device-aaaaaaaa', D2 = 'device-bbbbbbbb';
-  const shot = (f, extra = {}) => ({ descriptor: f, selfie: b64, deviceId: D1, ...extra });
-  check('config reports devMode on localhost (public route)', (await anon('config', {})).data.devMode === true);
-  check('check-in without a selfie is rejected', (await anon('check-in', { descriptor: F1, deviceId: D1 })).status === 400);
-  check('a selfie that is not a JPEG is rejected', (await anon('check-in', shot(F1, { selfie: Buffer.from('not a picture'.repeat(200)).toString('base64') }))).status === 400);
-  check('check-in with an unknown face is rejected (401)', (await anon('check-in', shot(face(98)))).status === 401);
-  r = await anon('check-in', shot(F1));
-  check('check-in by face with no location works in local test mode', r.status === 200, short(r.data));
-  check('second check-in is 409', (await anon('check-in', shot(F1))).status === 409);
-  check('another phone is blocked (device lock)', (await anon('check-out', shot(F1, { deviceId: D2 }))).status === 403);
-  r = await anon('check-out', shot(F1));
+  check('config reports devMode on localhost', (await fn(E1, 'config', {})).data.devMode === true);
+  check('check-in without a selfie is rejected', (await fn(E1, 'check-in', { deviceId: D1 })).status === 400);
+  check('someone else’s selfie path is rejected', (await fn(E1, 'check-in', { deviceId: D1, selfiePath: `selfies/${emp2}/x.jpg` })).status === 400);
+  check('a selfie that was never uploaded is rejected', (await fn(E1, 'check-in', { deviceId: D1, selfiePath: `selfies/${emp1}/ghost.jpg` })).status === 400);
+  r = await fn(E1, 'check-in', { deviceId: D1, selfiePath: await selfie(E1, emp1) });
+  check('check-in with no location works in local test mode', r.status === 200, short(r.data));
+  check('second check-in is 409', (await fn(E1, 'check-in', { deviceId: D1, selfiePath: await selfie(E1, emp1) })).status === 409);
+  check('another phone is blocked (device lock)', (await fn(E1, 'check-out', { deviceId: D2, selfiePath: await selfie(E1, emp1) })).status === 403);
+  r = await fn(E1, 'check-out', { deviceId: D1, selfiePath: await selfie(E1, emp1) });
   check('check-out works', r.status === 200, short(r.data));
-  check('second check-out is 409', (await anon('check-out', shot(F1))).status === 409);
-  r = await anon('me', { token: T1 });
-  check('the face token now shows today’s record with in and out times', r.data.today && r.data.today.in_time && r.data.today.out_time && r.data.history.length === 1, short(r.data).slice(0, 120));
+  check('second check-out is 409', (await fn(E1, 'check-out', { deviceId: D1, selfiePath: await selfie(E1, emp1) })).status === 409);
   const mine = (await rest(E1, 'GET', 'attendance?select=*')).data;
   check('employee sees their own record, marked as test', mine.length === 1 && mine[0].test === true && mine[0].in_time && mine[0].out_time, short(mine));
 
   // ---------- REAL mode (origin = the real site): the 10 m rule applies ----------
-  const base = () => shot(F2);
+  const base = async (token, uid) => ({ deviceId: D1, selfiePath: await selfie(token, uid) });
   r = await login(U2, 'Employee-Pass-1'); const E2 = r.data.access_token;
-  check('config says devMode false on the real site origin', (await anon('config', {}, PAGES)).data.devMode === false);
-  check('no location is refused', (await anon('check-in', base(), PAGES)).status === 400);
-  r = await anon('check-in', { ...base(), lat: OFFICE.lat + 0.001, lng: OFFICE.lng, accuracy: 5 }, PAGES);
+  check('config says devMode false on the real site origin', (await fn(E2, 'config', {}, PAGES)).data.devMode === false);
+  check('no location is refused', (await fn(E2, 'check-in', await base(E2, emp2), PAGES)).status === 400);
+  r = await fn(E2, 'check-in', { ...(await base(E2, emp2)), lat: OFFICE.lat + 0.001, lng: OFFICE.lng, accuracy: 5 }, PAGES);
   check('about 111 m away is refused', r.status === 422 && /from the office/.test(r.data.error), short(r.data));
-  r = await anon('check-in', { ...base(), ...OFFICE, accuracy: 40 }, PAGES);
+  r = await fn(E2, 'check-in', { ...(await base(E2, emp2)), ...OFFICE, accuracy: 40 }, PAGES);
   check('weak GPS (40 m) is refused', r.status === 422 && /GPS accuracy/.test(r.data.error), short(r.data));
-  r = await anon('check-in', { ...base(), lat: OFFICE.lat + 0.00015, lng: OFFICE.lng, accuracy: 8 }, PAGES);
+  r = await fn(E2, 'check-in', { ...(await base(E2, emp2)), lat: OFFICE.lat + 0.00015, lng: OFFICE.lng, accuracy: 8 }, PAGES);
   check('about 17 m away (outside 10 m) is refused', r.status === 422, short(r.data));
-  r = await anon('check-in', { ...base(), lat: OFFICE.lat + 0.00005, lng: OFFICE.lng, accuracy: 8 }, PAGES);
+  r = await fn(E2, 'check-in', { ...(await base(E2, emp2)), lat: OFFICE.lat + 0.00005, lng: OFFICE.lng, accuracy: 8 }, PAGES);
   check('about 5.5 m away with 8 m GPS error is accepted', r.status === 200, short(r.data));
-  check('check-out far away is refused', (await anon('check-out', { ...base(), lat: OFFICE.lat + 0.001, lng: OFFICE.lng, accuracy: 5 }, PAGES)).status === 422);
-  check('check-out at the office works', (await anon('check-out', { ...base(), ...OFFICE, accuracy: 6 }, PAGES)).status === 200);
+  check('check-out far away is refused', (await fn(E2, 'check-out', { ...(await base(E2, emp2)), lat: OFFICE.lat + 0.001, lng: OFFICE.lng, accuracy: 5 }, PAGES)).status === 422);
+  check('check-out at the office works', (await fn(E2, 'check-out', { ...(await base(E2, emp2)), ...OFFICE, accuracy: 6 }, PAGES)).status === 200);
   const rec2 = (await rest(E2, 'GET', 'attendance?select=*')).data[0];
   check('real-mode record is NOT marked test and keeps the distance', rec2 && rec2.test === false && rec2.in_dist <= 10, short(rec2));
-  check('local test mode cannot be switched on from the real site', (await anon('check-in', base(), PAGES)).status !== 200);
+  check('local test mode cannot be switched on from the real site', (await fn(E2, 'check-in', { ...(await base(E2, emp2)) }, PAGES)).status !== 200);
 
   // ---------- visits ----------
-  const visit = (extra) => anon('visit', { ...base(), ...extra }, PAGES);
+  const visit = async (extra) => fn(E2, 'visit', { ...(await base(E2, emp2)), ...extra }, PAGES);
   check('customer visit needs a customer name', (await visit({ type: 'customer_visit', reason: 'x', lat: OFFICE.lat + 0.05, lng: OFFICE.lng, accuracy: 30 })).status === 400);
   r = await visit({ type: 'customer_visit', customer: 'Tata Motors', reason: 'Demo', lat: OFFICE.lat + 0.05, lng: OFFICE.lng, accuracy: 30 });
   check('visit works away from the office', r.status === 200, short(r.data));
@@ -224,15 +183,15 @@ async function waitForFunction() {
   check('admin approves the visit', (await fn(A, 'admin-review', { table: 'visits', id: pv[0].id, status: 'approved' })).status === 200);
 
   // ---------- leave ----------
-  const leave = (token, o) => anon('leave', { token, reason: 'Family', ...o }, PAGES); // token = the face sign-in token
-  check('half-day over several dates is refused', (await leave(T2, { type: 'half_first', from: '2026-11-03', to: '2026-11-04' })).status === 400);
-  check('end before start is refused', (await leave(T2, { type: 'full', from: '2026-11-05', to: '2026-11-04' })).status === 400);
-  check('bad leave type is refused', (await leave(T2, { type: 'holiday', from: '2026-11-05', to: '2026-11-05' })).status === 400);
-  check('leave without a reason is refused', (await leave(T2, { type: 'full', from: '2026-11-05', to: '2026-11-05', reason: ' ' })).status === 400);
+  const leave = (token, o) => fn(token, 'leave', { reason: 'Family', ...o }, PAGES);
+  check('half-day over several dates is refused', (await leave(E2, { type: 'half_first', from: '2026-11-03', to: '2026-11-04' })).status === 400);
+  check('end before start is refused', (await leave(E2, { type: 'full', from: '2026-11-05', to: '2026-11-04' })).status === 400);
+  check('bad leave type is refused', (await leave(E2, { type: 'holiday', from: '2026-11-05', to: '2026-11-05' })).status === 400);
+  check('leave without a reason is refused', (await leave(E2, { type: 'full', from: '2026-11-05', to: '2026-11-05', reason: ' ' })).status === 400);
   check('employees can no longer write leave directly (it must go through the function)', (await rest(E2, 'POST', 'leaves', { user_id: emp2, type: 'full', from_date: '2026-11-03', to_date: '2026-11-03', reason: 'x' })).status >= 400);
-  check('leave needs a face token: an admin login or no token is refused', (await leave(A, { type: 'full', from: '2026-11-03', to: '2026-11-03' })).status === 401 && (await leave(undefined, { type: 'full', from: '2026-11-03', to: '2026-11-03' })).status === 401);
+  check('an admin cannot file leave through the employee route', (await leave(A, { type: 'full', from: '2026-11-03', to: '2026-11-03' })).status === 403);
   const mailsBefore = mails.length;
-  r = await leave(T2, { type: 'full', from: '2026-11-03', to: '2026-11-04', reason: 'Family function <b>& travel</b>' });
+  r = await leave(E2, { type: 'full', from: '2026-11-03', to: '2026-11-04', reason: 'Family function <b>& travel</b>' });
   check('full-day leave accepted', r.status === 200 && r.data.ok === true, short(r.data));
   if (process.env.REQUIRE_MAIL) {
     for (let i = 0; i < 20 && mails.length === mailsBefore; i++) await new Promise((r2) => setTimeout(r2, 250));
@@ -245,7 +204,7 @@ async function waitForFunction() {
   } else {
     check('the leave request is saved even when no mail server is reachable', r.status === 200);
   }
-  r = await leave(T2, { type: 'half_second', from: '2026-11-06', to: '2026-11-06', reason: 'Bank' });
+  r = await leave(E2, { type: 'half_second', from: '2026-11-06', to: '2026-11-06', reason: 'Bank' });
   check('half-day leave accepted', r.status === 200, short(r.data));
   check('employee cannot approve their own leave', (await rest(E2, 'PATCH', 'leaves?status=eq.pending', { status: 'approved' })).status >= 400 && (await rest(A, 'GET', `leaves?status=eq.approved&user_id=eq.${emp2}&select=id`)).data.length === 0);
   const pl = (await rest(A, 'GET', `leaves?status=eq.pending&user_id=eq.${emp2}&select=id`)).data;
@@ -308,20 +267,20 @@ async function waitForFunction() {
   check('the test festivals are cleaned up', (await hol(E2, '2026-11-09', '2026-11-11')).data.holidays.every((h) => h.kind !== 'festival'));
 
   // working on a holiday: allowed, recorded as holiday work, never counted late
-  r = await mk('e3' + RUN, F3); const emp3 = r.data.id;
+  r = await mk('e3' + RUN); const emp3 = r.data.id;
+  const E3 = (await login('e3' + RUN, 'Employee-Pass-1')).data.access_token;
   await fn(A, 'admin-settings', { ...s0, startTime: '00:00', graceMin: 0 }, PAGES); // so a normal check-in now would be late
   r = await fn(A, 'admin-holiday-add', { name: 'Declared today (test)', from: today }, PAGES);
   check('admin declares today a holiday', r.status === 200, short(r.data));
-  check('the employee app is told today is a holiday', (await anon('config', {}, PAGES)).data.holidayToday === 'Declared today (test)');
-  r = await anon('check-in', { descriptor: F3, selfie: b64, deviceId: 'holiday-device-1', lat: OFFICE.lat + 0.00003, lng: OFFICE.lng, accuracy: 6 }, PAGES);
+  check('the employee app is told today is a holiday', (await fn(E3, 'config', {}, PAGES)).data.holidayToday === 'Declared today (test)');
+  r = await fn(E3, 'check-in', { deviceId: 'holiday-device-1', selfiePath: await selfie(E3, emp3), lat: OFFICE.lat + 0.00003, lng: OFFICE.lng, accuracy: 6 }, PAGES);
   check('check-in on a holiday is still allowed, and is not late', r.status === 200 && r.data.late === false && r.data.holiday === 'Declared today (test)', short(r.data));
   const hrec = (await rest(A, 'GET', `attendance?user_id=eq.${emp3}&select=late,holiday_name`)).data[0];
   check('the record is tagged as holiday work', hrec && hrec.holiday_name === 'Declared today (test)' && hrec.late === false, short(hrec));
-  const todayHol = (await hol(E2, today, today)).data.holidays[0];
+  const todayHol = (await hol(E3, today, today)).data.holidays[0];
   await fn(A, 'admin-holiday-delete', { id: todayHol.id }, PAGES);
   await fn(A, 'admin-settings', { ...s0 }, PAGES); // restore the settings
-  const holAfter = (await anon('config', {}, PAGES)).data.holidayToday;
-  check('after removing the holiday the config no longer reports one', holAfter === null || holAfter === 'Sunday' || holAfter === '2nd Saturday', String(holAfter));
+  check('after removing the holiday the config no longer reports one', (await fn(E3, 'config', {}, PAGES)).data.holidayToday === null || (await fn(E3, 'config', {}, PAGES)).data.holidayToday === 'Sunday' || (await fn(E3, 'config', {}, PAGES)).data.holidayToday === '2nd Saturday');
   await fn(A, 'admin-delete-user', { id: emp3 }, PAGES);
 
   // ---------- managing employees ----------
@@ -333,27 +292,21 @@ async function waitForFunction() {
   check('admin sets a new employee password', (await fn(A, 'admin-update-user', { id: emp1, password: 'NewPassword-5678' })).status === 200);
   check('old password no longer works', (await login(U1, 'Employee-Pass-1')).status === 400);
   check('new password works', (await login(U1, 'NewPassword-5678')).status === 200);
-  check('a new photo needs a face descriptor', (await fn(A, 'admin-update-user', { id: emp1, photo: b64 })).status === 400);
-  check('a new photo cannot use another employee’s face', (await fn(A, 'admin-update-user', { id: emp1, photo: b64, faceDescriptor: near(F2) })).status === 409);
-  const F1b = face(21);
-  check('admin replaces the employee photo and face', (await fn(A, 'admin-update-user', { id: emp1, photo: b64, faceDescriptor: F1b })).status === 200);
-  check('the old face no longer signs in, the new one does', (await anon('face-login', { descriptor: F1 })).status === 401 && (await anon('face-login', { descriptor: F1b })).data.user.id === emp1);
+  check('admin replaces the employee photo', (await fn(A, 'admin-update-user', { id: emp1, photo: b64 })).status === 200);
   check('admin disables an employee', (await fn(A, 'admin-update-user', { id: emp2, active: false })).status === 200);
-  check('disabled employee cannot sign in with a password session', (await login(U2, 'Employee-Pass-1')).status >= 400);
-  check('disabled employee’s face is no longer accepted', (await anon('face-login', { descriptor: F2 })).status === 401 && (await anon('check-in', shot(F2))).status === 401);
-  const stale = (await anon('me', { token: T2 })).status;
-  check('disabled employee’s earlier face token is refused', stale === 403 || stale === 401, String(stale));
-  check('admin re-enables the employee', (await fn(A, 'admin-update-user', { id: emp2, active: true })).status === 200 && (await login(U2, 'Employee-Pass-1')).status === 200 && (await anon('face-login', { descriptor: F2 })).status === 200);
+  check('disabled employee cannot sign in', (await login(U2, 'Employee-Pass-1')).status >= 400);
+  const stale = (await fn(E2, 'config', {})).status;
+  check('disabled employee’s old session is refused by the function', stale === 401 || stale === 403, String(stale));
+  check('admin re-enables the employee', (await fn(A, 'admin-update-user', { id: emp2, active: true })).status === 200 && (await login(U2, 'Employee-Pass-1')).status === 200);
   check('admin cannot delete an admin account', (await fn(A, 'admin-delete-user', { id: adminId })).status === 404);
   const files = (await admin('POST', '/storage/v1/object/list/photos', { prefix: `selfies/${emp1}`, limit: 100 })).data;
   check('(before delete) the employee has stored selfies', Array.isArray(files) && files.length > 0);
   check('admin deletes an employee', (await fn(A, 'admin-delete-user', { id: emp1 })).status === 200);
   check('deleted employee cannot sign in', (await login(U1, 'NewPassword-5678')).status >= 400);
-  check('deleted employee’s face is no longer recognised', (await anon('face-login', { descriptor: F1b })).status === 401);
   check('deleted employee’s attendance is gone', (await admin('GET', `/rest/v1/attendance?user_id=eq.${emp1}&select=id`)).data.length === 0);
   const after = (await admin('POST', '/storage/v1/object/list/photos', { prefix: `selfies/${emp1}`, limit: 100 })).data;
   check('deleted employee’s photos are gone', Array.isArray(after) && after.length === 0, short(after));
-  check('the function rejects admin calls without a signed-in user', (await fn(null, 'admin-review', {})).status === 401);
+  check('the function rejects calls without a signed-in user', (await fn(null, 'config', {})).status === 401);
 
   // clean up what this run created
   await fn(A, 'admin-delete-user', { id: emp2 });

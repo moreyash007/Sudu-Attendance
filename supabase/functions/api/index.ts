@@ -1,10 +1,8 @@
-// SUDU Attendance: the server-side rules. Employees do not sign in: they are identified by a live face scan
-// (face-login, check-in, check-out, visit take the face descriptor; me and leave take the token face-login issues).
-// Admin routes need a signed-in admin with the authenticator-app step (aal2). Employees cannot write attendance
-// any other way (see the SQL security rules).
+// SUDU Attendance: the server-side rules. Every route needs a signed-in user; admin routes also need the
+// authenticator-app step (aal2). Employees cannot write attendance any other way (see the SQL security rules).
 //
 // Routes (POST /functions/v1/api/<route>):
-//   employee: config, holidays, face-login, me, check-in, check-out, visit, leave
+//   employee: config, holidays, check-in, check-out, visit, leave
 //   admin:    admin-create-user, admin-update-user, admin-delete-user, admin-review, admin-settings,
 //             admin-holiday-add, admin-holiday-update, admin-holiday-delete, admin-holiday-rules
 import { createClient } from 'npm:@supabase/supabase-js@2';
@@ -110,14 +108,6 @@ function isLocalRequest(req: Request) {
   try { return ['localhost', '127.0.0.1'].includes(new URL(req.headers.get('origin') ?? '').hostname); } catch { return false; }
 }
 
-// Validates a face descriptor: exactly 128 finite numbers.
-function parseDescriptor(d: unknown): number[] {
-  if (!Array.isArray(d) || d.length !== 128 || !d.every((n) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 10)) {
-    fail(400, 'No clear face found in the photo. Retake it facing the camera.');
-  }
-  return d as number[];
-}
-
 // Validates a base64 JPEG (the admin's enrolment photo) and returns its bytes.
 function parsePhoto(b64: unknown): Uint8Array {
   if (typeof b64 !== 'string' || b64.length > 2_200_000) fail(400, 'A photo is required.');
@@ -148,65 +138,6 @@ async function authenticate(req: Request): Promise<Auth> {
   const { data: profile } = await db.from('profiles').select('*').eq('id', data.user!.id).maybeSingle();
   if (!profile || !profile.active) fail(403, 'Your account is not active.');
   return { userId: data.user!.id, profile: profile!, aal: String(jwtClaims(token).aal ?? '') };
-}
-
-// ---------- face identification (employees do not sign in) ----------
-// The browser sends the face descriptor from a live blink-checked scan; the server finds whose face it is. The stored
-// descriptors never leave the server.
-
-const FACE_MATCH_MAX = 0.5;   // Euclidean distance between descriptors; lower = more alike
-const FACE_MARGIN = 0.04;     // the best match must beat the runner-up by this much, else it is ambiguous
-const FACE_DUPLICATE = 0.45;  // enrolling a face this close to another employee is refused
-const TOKEN_MS = 20 * 60 * 1000;
-
-function faceDistance(a: number[], b: number[]) {
-  let s = 0;
-  for (let i = 0; i < 128; i++) s += (a[i] - b[i]) ** 2;
-  return Math.sqrt(s);
-}
-
-async function enrolledFaces(exceptId?: string) {
-  const { data, error } = await db.from('profiles').select('*').eq('role', 'employee').eq('active', true).not('face_descriptor', 'is', null);
-  if (error) throw error;
-  return (data ?? []).filter((p) => p.id !== exceptId && Array.isArray(p.face_descriptor) && p.face_descriptor.length === 128);
-}
-
-function rankFaces(descriptor: number[], faces: Record<string, any>[]) {
-  return faces.map((p) => ({ p, d: faceDistance(descriptor, p.face_descriptor) })).sort((x, y) => x.d - y.d);
-}
-
-async function faceAuth(descriptor: unknown): Promise<Auth> {
-  const d = parseDescriptor(descriptor);
-  const ranked = rankFaces(d, await enrolledFaces());
-  const best = ranked[0], next = ranked[1];
-  if (!best || best.d > FACE_MATCH_MAX || (next && next.d - best.d < FACE_MARGIN)) {
-    fail(401, 'Face not recognised. Look straight at the camera in good light and try again.');
-  }
-  return { userId: best.p.id, profile: best.p, aal: '' };
-}
-
-const enc = new TextEncoder();
-const hmacKey = crypto.subtle.importKey('raw', enc.encode(SERVICE_KEY), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-async function sign(payload: string) {
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey, enc.encode(payload)));
-  return btoa(String.fromCharCode(...sig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-const issueToken = async (userId: string) => {
-  const payload = `${userId}.${Date.now() + TOKEN_MS}`;
-  return `${payload}.${await sign(payload)}`;
-};
-
-// For routes that follow a face sign-in (history, leave): checks the token the server issued after a face scan.
-async function tokenAuth(token: unknown): Promise<Auth> {
-  const parts = String(token ?? '').split('.');
-  if (parts.length !== 3 || !isUuid(parts[0])) fail(401, 'Please scan your face again.');
-  const expected = await sign(`${parts[0]}.${parts[1]}`);
-  let diff = expected.length ^ parts[2].length;
-  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ (parts[2].charCodeAt(i) || 0);
-  if (diff !== 0 || Number(parts[1]) < Date.now()) fail(401, 'Please scan your face again.');
-  const { data: profile } = await db.from('profiles').select('*').eq('id', parts[0]).maybeSingle();
-  if (!profile || !profile.active || profile.role !== 'employee') fail(403, 'Your account is not active.');
-  return { userId: parts[0], profile: profile!, aal: '' };
 }
 
 function requireAdmin(a: Auth) {
@@ -249,33 +180,17 @@ async function prepare(c: Ctx, opts: { inside: boolean; maxAccuracy?: number }) 
     }
   }
 
-  // The live selfie from the face scan, stored in the employee's private folder.
-  const bytes = parsePhoto(b.selfie);
-  const path = `selfies/${a.userId}/${Date.now()}.jpg`;
-  const up = await db.storage.from('photos').upload(path, bytes, { contentType: 'image/jpeg' });
-  if (up.error) throw up.error;
+  // The selfie was uploaded by the browser straight into the employee's own folder; confirm it is really there.
+  const path = String(b.selfiePath ?? '');
+  const m = path.match(/^(selfies\/([0-9a-f-]{36}))\/([\w.-]+\.jpg)$/i);
+  if (!m || m[2] !== a.userId) fail(400, 'Selfie is required.');
+  const { data: files } = await db.storage.from('photos').list(m![1], { search: m![3] });
+  if (!files?.some((f) => f.name === m![3])) fail(400, 'Selfie upload not found. Try again.');
 
   return { office, loc, photo: path };
 }
 
 // ---------- employee routes ----------
-
-// Face sign-in: who is this? Returns a short-lived token for history and leave.
-async function faceLogin(c: Ctx) {
-  const p = c.auth.profile;
-  return { token: await issueToken(c.auth.userId), user: { id: p.id, name: p.name, empId: p.emp_id } };
-}
-
-// Today's record, history and leave requests for the face-signed-in employee.
-async function me(c: Ctx) {
-  const uid = c.auth.userId;
-  const [a, h, l] = await Promise.all([
-    db.from('attendance').select('*').eq('user_id', uid).eq('date', dateKey()).maybeSingle(),
-    db.from('attendance').select('*').eq('user_id', uid).order('date', { ascending: false }).limit(60),
-    db.from('leaves').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(20),
-  ]);
-  return { today: a.data, history: h.data ?? [], leaves: l.data ?? [] };
-}
 
 async function config(c: Ctx) {
   const o = await getOffice();
@@ -395,24 +310,15 @@ async function removeFolder(folder: string) {
   if (data?.length) await db.storage.from('photos').remove(data.map((f) => `${folder}/${f.name}`));
 }
 
-// Two employees with near-identical faces would make the face sign-in ambiguous, so refuse the enrolment.
-async function refuseLookAlike(descriptor: number[], exceptId?: string) {
-  const [close] = rankFaces(descriptor, await enrolledFaces(exceptId));
-  if (close && close.d < FACE_DUPLICATE) fail(409, `This face is too similar to ${close.p.name}. Retake the photo, or check this person is not already added.`);
-}
-
 async function adminCreateUser(c: Ctx) {
   requireAdmin(c.auth);
   const b = c.body;
   const username = String(b.username ?? '').trim().toLowerCase();
   const name = String(b.name ?? '').trim().slice(0, 100);
-  // Employees sign in with their face, so the login password is random and never used.
-  const password = crypto.randomUUID() + crypto.randomUUID();
+  const password = String(b.password ?? '');
   if (!isUsername(username)) fail(400, 'Username must be 3-32 characters: letters, numbers, dot, dash or underscore.');
-  if (!name) fail(400, 'Enter a name.');
+  if (!name || password.length < 8 || password.length > 72) fail(400, 'Enter a name and a password of 8-72 characters.');
   const bytes = parsePhoto(b.photo); // the employee's picture, taken by the admin
-  const descriptor = parseDescriptor(b.faceDescriptor);
-  await refuseLookAlike(descriptor);
 
   const { data: existing } = await db.from('profiles').select('id').ilike('username', username).maybeSingle();
   if (existing) fail(409, 'That username is already taken.');
@@ -432,7 +338,6 @@ async function adminCreateUser(c: Ctx) {
     if (up.error) throw up.error;
     const ins = await db.from('profiles').insert({
       id, username, name, emp_id: String(b.empId ?? '').trim().slice(0, 40), role: 'employee', enrol_photo: path,
-      face_descriptor: descriptor,
     });
     if (ins.error) throw ins.error;
   } catch (e) {
@@ -468,12 +373,10 @@ async function adminUpdateUser(c: Ctx) {
   }
   if (b.photo !== undefined) {
     const bytes = parsePhoto(b.photo);
-    const descriptor = parseDescriptor(b.faceDescriptor);
-    await refuseLookAlike(descriptor, emp.id);
     const path = `enroll/${emp.id}/photo-${Date.now()}.jpg`;
     const up = await db.storage.from('photos').upload(path, bytes, { contentType: 'image/jpeg' });
     if (up.error) throw up.error;
-    await db.from('profiles').update({ enrol_photo: path, face_descriptor: descriptor }).eq('id', emp.id);
+    await db.from('profiles').update({ enrol_photo: path }).eq('id', emp.id);
   }
   return { ok: true };
 }
@@ -567,8 +470,6 @@ async function adminHolidayRules(c: Ctx) {
 const ROUTES: Record<string, (c: Ctx) => Promise<unknown>> = {
   'config': config,
   'holidays': holidays,
-  'face-login': faceLogin,
-  'me': me,
   'admin-holiday-add': adminHolidayAdd,
   'admin-holiday-update': adminHolidayUpdate,
   'admin-holiday-delete': adminHolidayDelete,
@@ -591,11 +492,7 @@ Deno.serve(async (req) => {
     const handler = ROUTES[route];
     if (!handler || req.method !== 'POST') fail(404, 'Not found.');
     const body = await req.json().catch(() => ({}));
-    // Employees are identified by their face, admins by their login. Only 'config' and 'holidays' need no identity.
-    const auth = ['config', 'holidays'].includes(route) ? ({} as Auth)
-      : ['face-login', 'check-in', 'check-out', 'visit'].includes(route) ? await faceAuth(body.descriptor)
-      : ['me', 'leave'].includes(route) ? await tokenAuth(body.token)
-      : await authenticate(req);
+    const auth = await authenticate(req);
     return json(await handler({ req, body, auth, dev: ALLOW_LOCAL_TEST && isLocalRequest(req) }));
   } catch (e) {
     if (e instanceof HttpError) return json({ error: e.message }, e.status);

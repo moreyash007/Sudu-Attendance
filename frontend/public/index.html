@@ -13,8 +13,9 @@
 <div id="loginBox" class="card center-box hidden">
   <img class="logo big" src="logo.png" alt="SUDU Logistics">
   <h2 data-i18n="attendance">Attendance</h2>
-  <p class="muted" style="text-align:center" data-i18n="scanHint">No password needed. Look at the camera and blink once.</p>
-  <button class="primary" id="loginBtn" data-i18n="scanFace">Scan face</button>
+  <input id="username" data-i18n-ph="username" placeholder="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
+  <input id="password" type="password" data-i18n-ph="password" placeholder="Password" autocomplete="current-password">
+  <button class="primary" id="loginBtn" data-i18n="signin">Sign in</button>
   <div id="loginErr" class="err"></div>
   <div class="tools" style="justify-content:center"><button id="langBtn1" type="button">हिन्दी</button><button id="themeBtn1" type="button">&#9680;</button></div>
 </div>
@@ -94,7 +95,6 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="config.js"></script>
 <script src="api.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js"></script>
 <script src="camera.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -125,11 +125,6 @@ const I18N = {
     capture: 'Capture selfie', cancel: 'Cancel', ready: 'Look straight at the camera.',
     camera: 'Camera blocked. Allow camera access for this site.',
     cancelled: 'Selfie is required.',
-    scanHint: 'No password needed. Look at the camera and blink once.', scanFace: 'Scan face',
-    hello: 'Signed in as ', sessionEnd: 'Please scan your face again.',
-    loading: 'Loading face check...', noFace: 'No face found. Look straight at the camera.', manyFaces: 'Only one face please.',
-    closer: 'Move closer to the camera.', blink: 'Face found. Blink once to confirm you are live.', checking: 'Checking...',
-    timeout: 'Face check timed out. Try again in better light.', engine: 'Face check could not load. Check your internet and try again.',
     locBlocked: 'Location blocked. Allow location for this site in your browser settings.', locFail: 'Could not get your location. Turn on GPS and try again.',
     st_pending: 'Pending', st_approved: 'Approved', st_rejected: 'Rejected',
     t_full: 'Full day', t_half_first: 'Half day (1st half)', t_half_second: 'Half day (2nd half)',
@@ -156,11 +151,6 @@ const I18N = {
     capture: 'सेल्फी लें', cancel: 'रद्द करें', ready: 'सीधे कैमरे की ओर देखें।',
     camera: 'कैमरा बंद है। इस साइट के लिए कैमरा अनुमति दें।',
     cancelled: 'सेल्फी आवश्यक है।',
-    scanHint: 'पासवर्ड की ज़रूरत नहीं। कैमरे की ओर देखें और एक बार पलक झपकाएँ।', scanFace: 'चेहरा स्कैन करें',
-    hello: 'साइन इन: ', sessionEnd: 'कृपया अपना चेहरा दोबारा स्कैन करें।',
-    loading: 'फेस जाँच लोड हो रही है...', noFace: 'चेहरा नहीं मिला। सीधे कैमरे की ओर देखें।', manyFaces: 'कृपया केवल एक चेहरा।',
-    closer: 'कैमरे के थोड़ा पास आएँ।', blink: 'चेहरा मिल गया। असली होने की पुष्टि के लिए एक बार पलक झपकाएँ।', checking: 'जाँच हो रही है...',
-    timeout: 'फेस जाँच का समय समाप्त। बेहतर रोशनी में दोबारा कोशिश करें।', engine: 'फेस जाँच लोड नहीं हुई। इंटरनेट देखकर दोबारा कोशिश करें।',
     locBlocked: 'लोकेशन बंद है। ब्राउज़र सेटिंग में इस साइट के लिए लोकेशन की अनुमति दें।', locFail: 'लोकेशन नहीं मिली। GPS चालू करके दोबारा कोशिश करें।',
     st_pending: 'लंबित', st_approved: 'मंज़ूर', st_rejected: 'अस्वीकृत',
     t_full: 'पूरा दिन', t_half_first: 'आधा दिन (पहला)', t_half_second: 'आधा दिन (दूसरा)',
@@ -281,25 +271,12 @@ function bestFix(maxAcc, ms = 15000) {
 }
 
 // ---------- submit flow: location -> selfie -> server ----------
-const { call, blobToBase64 } = Sudu;
+const { sb, emailOf, call } = Sudu;
 const istToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-let me = null;    // { id, name, empId } from the last face sign-in
-let token = null; // short-lived token the server issues after a face sign-in; used for history and leave
-
-// Live camera: waits for a blink, then returns { blob, descriptor }. The server decides whose face it is.
-const scanFace = () => Camera.scan({
-  cancel: t('cancel'), camera: t('camera'), cancelled: t('cancelled'), loading: t('loading'), noFace: t('noFace'),
-  manyFaces: t('manyFaces'), closer: t('closer'), blink: t('blink'), checking: t('checking'), timeout: t('timeout'), engine: t('engine'),
-});
+let me = null; // { id, name, role }
 
 let busy = false;
 function setBusy(v) { busy = v; ['mainBtn', 'vSend', 'lSend'].forEach((id) => ($(id).disabled = v)); renderMainBtn(); }
-
-// Call that needs the face token; when it has expired, go back to the face sign-in screen.
-async function callAuthed(route, body = {}) {
-  try { return await call(route, { ...body, token }); }
-  catch (e) { if (e.status === 401) { showLogin(); $('loginErr').textContent = t('sessionEnd'); } throw e; }
-}
 
 async function submit(route, extra = {}) {
   if (busy) return false;
@@ -308,9 +285,15 @@ async function submit(route, extra = {}) {
     toast(t('gettingLoc'));
     // In local test mode a PC without GPS is fine: wait briefly, then continue without a location.
     const loc = office.devMode ? await bestFix(office.maxAccuracy, 5000).catch(() => ({})) : await bestFix(office.maxAccuracy);
-    const shot = await scanFace(); // every check-in / check-out / visit is a fresh live face scan
+    const shot = await Camera.capture({
+      capture: t('capture'), cancel: t('cancel'), ready: t('ready'), camera: t('camera'), cancelled: t('cancelled'),
+    });
     toast(t('submitting'));
-    const res = await call(route, { ...loc, ...extra, descriptor: shot.descriptor, selfie: await blobToBase64(shot.blob), deviceId: deviceId() });
+    // The selfie goes straight into this employee's private folder; the server then checks it is there.
+    const path = `selfies/${me.id}/${Date.now()}.jpg`;
+    const up = await sb.storage.from('photos').upload(path, shot.blob, { contentType: 'image/jpeg' });
+    if (up.error) throw new Error(up.error.message);
+    const res = await call(route, { ...loc, ...extra, selfiePath: path, deviceId: deviceId() });
     toast(res.late ? t('doneLate') : t('done'));
     await refresh();
     return true;
@@ -324,14 +307,21 @@ async function submit(route, extra = {}) {
 let today = null, leaves = [], history = [], pollTimer = null;
 
 function showLogin() {
-  stopWatch(); clearInterval(pollTimer); me = null; token = null; today = null;
+  stopWatch(); clearInterval(pollTimer); me = null;
   $('loginBox').classList.remove('hidden'); $('app').classList.add('hidden');
 }
 
-async function enter(res) {
-  me = res.user; token = res.token;
+async function enter(userId) {
+  const { data: prof } = await sb.from('profiles').select('id, name, role, active').eq('id', userId).maybeSingle();
+  if (!prof || !prof.active || prof.role !== 'employee') {
+    const wasAdmin = prof && prof.role === 'admin';
+    await sb.auth.signOut(); showLogin();
+    $('loginErr').textContent = wasAdmin ? t('adminHere') : t('wrongLogin');
+    return;
+  }
+  me = prof;
   $('loginBox').classList.add('hidden'); $('app').classList.remove('hidden');
-  $('who').textContent = me.name;
+  $('who').textContent = prof.name;
   try { await loadOffice(); } catch (e) {}
   initMap(); startWatch();
   await refresh();
@@ -344,8 +334,13 @@ async function refresh() {
   renderZone();
   try { upcomingHolidays = (await call('holidays', { from: istToday(), to: daysFromNow(45) })).holidays; } catch (e) {}
   renderHoliday();
-  const mine = await callAuthed('me');
-  today = mine.today; history = mine.history || []; leaves = mine.leaves || [];
+  const uid = me.id;
+  const [a, h, l] = await Promise.all([
+    sb.from('attendance').select('*').eq('user_id', uid).eq('date', istToday()).maybeSingle(),
+    sb.from('attendance').select('*').eq('user_id', uid).order('date', { ascending: false }).limit(60),
+    sb.from('leaves').select('*').eq('user_id', uid).order('created_at', { ascending: false }).limit(20),
+  ]);
+  today = a.data; history = h.data || []; leaves = l.data || [];
   $('tIn').textContent = fmtTime(today && today.in_time);
   $('tOut').textContent = fmtTime(today && today.out_time);
   $('lateNote').classList.toggle('hidden', !(today && today.late));
@@ -383,14 +378,15 @@ function renderLists() {
 
 $('loginBtn').onclick = async () => {
   $('loginErr').textContent = '';
-  $('loginBtn').disabled = true;
-  try {
-    const shot = await scanFace();
-    await enter(await call('face-login', { descriptor: shot.descriptor }));
-  } catch (e) { $('loginErr').textContent = e.message; }
-  $('loginBtn').disabled = false;
+  const username = $('username').value.trim();
+  if (!username || !$('password').value) return;
+  const { data, error } = await sb.auth.signInWithPassword({ email: emailOf(username), password: $('password').value });
+  if (error) { $('loginErr').textContent = /invalid|credentials/i.test(error.message) ? t('wrongLogin') : error.message; return; }
+  $('password').value = '';
+  try { await enter(data.user.id); } catch (e) { $('loginErr').textContent = e.message; }
 };
-$('logout').onclick = () => showLogin();
+$('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+$('logout').onclick = async () => { await sb.auth.signOut(); today = null; showLogin(); };
 
 $('mainBtn').onclick = () => { const route = $('mainBtn').dataset.route; if (route) submit(route); };
 
@@ -408,7 +404,7 @@ $('lSend').onclick = async () => {
   if (!from || !to || to < from || !reason) return toast(t('badDates'));
   setBusy(true);
   try {
-    await callAuthed('leave', { type, from, to, reason }); // the server saves it and emails the admin
+    await call('leave', { type, from, to, reason }); // the server saves it and emails the admin
     $('lReason').value = ''; toast(t('leaveSent')); await refresh();
   } catch (e) { toast(e.message); } finally { setBusy(false); }
 };
@@ -421,7 +417,12 @@ $('tabs').onclick = (e) => {
 };
 
 applyLang();
-showLogin(); // no stored login: every visit starts with a face scan
+(async () => {
+  try {
+    const { data } = await sb.auth.getSession();
+    if (data.session) await enter(data.session.user.id); else showLogin();
+  } catch (e) { showLogin(); }
+})();
 </script>
 </body>
 </html>

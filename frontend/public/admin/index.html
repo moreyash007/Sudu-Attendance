@@ -62,7 +62,6 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="../config.js"></script>
 <script src="../api.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js"></script>
 <script src="../camera.js"></script>
 <script>
 const { sb, emailOf, call, blobToBase64 } = Sudu;
@@ -198,7 +197,7 @@ const who = (r) => ({ uid: r.user_id, name: r.profile && r.profile.name, empId: 
 const nAtt = (r) => ({ ...who(r), id: r.id, date: r.date, late: r.late, test: r.test, holiday: r.holiday_name, inTime: r.in_time, outTime: r.out_time, inLoc: { distance: r.in_dist }, inSelfie: r.in_photo, outSelfie: r.out_photo });
 const nVisit = (r) => ({ ...who(r), id: r.id, date: r.date, type: r.type, customer: r.customer, reason: r.reason, time: r.time, loc: { lat: r.lat, lng: r.lng }, selfie: r.photo, status: r.status });
 const nLeave = (r) => ({ ...who(r), id: r.id, type: r.type, from: r.from_date, to: r.to_date, reason: r.reason, status: r.status });
-const nUser = (r) => ({ id: r.id, name: r.name, empId: r.emp_id, username: r.username, role: r.role, active: r.active, deviceBound: !!r.device_id, photo: r.enrol_photo, face: !!r.face_descriptor, isAdmin: r.role === 'admin' });
+const nUser = (r) => ({ id: r.id, name: r.name, empId: r.emp_id, username: r.username, role: r.role, active: r.active, deviceBound: !!r.device_id, photo: r.enrol_photo, isAdmin: r.role === 'admin' });
 
 async function loadAll() {
   const today = istDate(), since = istDate(new Date(Date.now() - 13 * 86400000));
@@ -322,7 +321,7 @@ function renderEmployees() {
     $('employees').dataset.ready = '1';
     $('employees').innerHTML = `<div class="card"><h3>Add employee</h3>
       <div class="row"><input id="n" placeholder="Full name"><input id="i" placeholder="Employee ID"></div>
-      <div class="row"><input id="u" placeholder="Username (letters, numbers, . _ -)" autocapitalize="none"></div>
+      <div class="row"><input id="u" placeholder="Username (letters, numbers, . _ -)" autocapitalize="none"><input id="p" type="text" placeholder="Temporary password (8+ characters)"></div>
       <div class="row"><button id="shot" type="button">Take employee's photo</button><span id="shotState" class="muted">No photo yet</span></div>
       <button class="primary" id="addEmp" style="max-width:240px">Add employee</button><div id="empMsg" class="muted" style="margin-top:8px"></div></div>
       <div class="card" id="empTable"></div>`;
@@ -334,7 +333,7 @@ function renderEmployees() {
   }
   const rows = S.users.map((u) => `<tr>
     <td>${esc(u.name)}</td><td>${esc(u.empId)}</td><td>${esc(u.username)}</td>
-    <td>${u.isAdmin ? 'Admin' : (u.deviceBound ? 'Bound' : 'Not set') + (u.face ? '' : ' · <b>No face: re-take photo</b>')}</td><td>${u.active ? 'Active' : 'Disabled'}</td>
+    <td>${u.isAdmin ? 'Admin' : u.deviceBound ? 'Bound' : 'Not set'}</td><td>${u.active ? 'Active' : 'Disabled'}</td>
     <td>${u.isAdmin ? '' : `${btn('Reset device', { act: 'resetDevice', id: u.id })}
         ${btn('Re-take photo', { act: 'reface', id: u.id })}
         ${u.photo ? btn('Photo', { act: 'photo', id: u.photo }) : ''}
@@ -345,17 +344,14 @@ function renderEmployees() {
 
 async function addEmployee() {
   const msg = $('empMsg');
-  const v = { name: $('n').value.trim(), empId: $('i').value.trim(), username: $('u').value.trim().toLowerCase() };
-  if (!v.name || !v.username) { msg.textContent = 'Enter name and username.'; return; }
+  const v = { name: $('n').value.trim(), empId: $('i').value.trim(), username: $('u').value.trim().toLowerCase(), password: $('p').value };
+  if (!v.name || !v.username || v.password.length < 8) { msg.textContent = 'Enter name, username and a password of 8+ characters.'; return; }
   if (!newFace) { msg.textContent = "Take the employee's photo first."; return; }
-  $('addEmp').disabled = true; msg.textContent = 'Reading the face...';
+  $('addEmp').disabled = true; msg.textContent = 'Adding...';
   try {
-    const faceDescriptor = await Camera.descriptorOf(newFace.blob);
-    if (!faceDescriptor) throw new Error('Could not find exactly one clear face in the photo. Retake it facing the camera, alone, in good light.');
-    msg.textContent = 'Adding...';
-    await call('admin-create-user', { ...v, photo: await blobToBase64(newFace.blob), faceDescriptor });
-    msg.textContent = 'Employee added. They sign in by face; no password needed.';
-    ['n', 'i', 'u'].forEach((id) => ($(id).value = ''));
+    await call('admin-create-user', { ...v, photo: await blobToBase64(newFace.blob) });
+    msg.textContent = 'Employee added.';
+    ['n', 'i', 'u', 'p'].forEach((id) => ($(id).value = ''));
     newFace = null; $('shotState').textContent = 'No photo yet';
     await loadAll();
   } catch (e) { msg.textContent = e.message; }
@@ -363,13 +359,9 @@ async function addEmployee() {
 }
 
 async function reenrol(id) {
-  try {
-    const shot = await Camera.capture();
-    const faceDescriptor = await Camera.descriptorOf(shot.blob);
-    if (!faceDescriptor) return alert('Could not find exactly one clear face in the photo. Try again facing the camera, alone, in good light.');
-    await call('admin-update-user', { id, photo: await blobToBase64(shot.blob), faceDescriptor });
-    alert('Photo updated.');
-  } catch (e) { alert(e.message); }
+  const shot = await Camera.capture();
+  await call('admin-update-user', { id, photo: await blobToBase64(shot.blob) });
+  alert('Photo updated.');
 }
 
 // ---------- holidays ----------

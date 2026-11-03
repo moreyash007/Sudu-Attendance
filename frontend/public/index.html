@@ -128,7 +128,7 @@ const I18N = {
     scanHint: 'No password needed. Look at the camera and blink once.', scanFace: 'Scan face',
     hello: 'Signed in as ', sessionEnd: 'Please scan your face again.',
     loading: 'Loading face check...', noFace: 'No face found. Look straight at the camera.', manyFaces: 'Only one face please.',
-    closer: 'Move closer to the camera.', blink: 'Face found. Blink once to confirm you are live.', checking: 'Checking...', blinkHelp: 'Look straight at the camera and blink slowly, once.',
+    closer: 'Move closer to the camera.', blink: 'Face found. Blink once to confirm you are live.', checking: 'Checking...',
     timeout: 'Face check timed out. Try again in better light.', engine: 'Face check could not load. Check your internet and try again.',
     locBlocked: 'Location blocked. Allow location for this site in your browser settings.', locFail: 'Could not get your location. Turn on GPS and try again.',
     st_pending: 'Pending', st_approved: 'Approved', st_rejected: 'Rejected',
@@ -159,7 +159,7 @@ const I18N = {
     scanHint: 'पासवर्ड की ज़रूरत नहीं। कैमरे की ओर देखें और एक बार पलक झपकाएँ।', scanFace: 'चेहरा स्कैन करें',
     hello: 'साइन इन: ', sessionEnd: 'कृपया अपना चेहरा दोबारा स्कैन करें।',
     loading: 'फेस जाँच लोड हो रही है...', noFace: 'चेहरा नहीं मिला। सीधे कैमरे की ओर देखें।', manyFaces: 'कृपया केवल एक चेहरा।',
-    closer: 'कैमरे के थोड़ा पास आएँ।', blink: 'चेहरा मिल गया। असली होने की पुष्टि के लिए एक बार पलक झपकाएँ।', checking: 'जाँच हो रही है...', blinkHelp: 'सीधे कैमरे की ओर देखें और धीरे से एक बार पलक झपकाएँ।',
+    closer: 'कैमरे के थोड़ा पास आएँ।', blink: 'चेहरा मिल गया। असली होने की पुष्टि के लिए एक बार पलक झपकाएँ।', checking: 'जाँच हो रही है...',
     timeout: 'फेस जाँच का समय समाप्त। बेहतर रोशनी में दोबारा कोशिश करें।', engine: 'फेस जाँच लोड नहीं हुई। इंटरनेट देखकर दोबारा कोशिश करें।',
     locBlocked: 'लोकेशन बंद है। ब्राउज़र सेटिंग में इस साइट के लिए लोकेशन की अनुमति दें।', locFail: 'लोकेशन नहीं मिली। GPS चालू करके दोबारा कोशिश करें।',
     st_pending: 'लंबित', st_approved: 'मंज़ूर', st_rejected: 'अस्वीकृत',
@@ -289,7 +289,7 @@ let token = null; // short-lived token the server issues after a face sign-in; u
 // Live camera: waits for a blink, then returns { blob, descriptor }. The server decides whose face it is.
 const scanFace = () => Camera.scan({
   cancel: t('cancel'), camera: t('camera'), cancelled: t('cancelled'), loading: t('loading'), noFace: t('noFace'),
-  manyFaces: t('manyFaces'), closer: t('closer'), blink: t('blink'), blinkHelp: t('blinkHelp'), checking: t('checking'), timeout: t('timeout'), engine: t('engine'),
+  manyFaces: t('manyFaces'), closer: t('closer'), blink: t('blink'), checking: t('checking'), timeout: t('timeout'), engine: t('engine'),
 });
 
 let busy = false;

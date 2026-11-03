@@ -59,7 +59,6 @@
     closer: 'Move closer to the camera.',
     blink: 'Face found. Blink once to confirm you are live.',
     checking: 'Checking...',
-    blinkHelp: 'Look straight at the camera and blink slowly, once.',
     timeout: 'Face check timed out. Try again in better light.',
     engine: 'Face check could not load. Check your internet and try again.',
   };
@@ -76,38 +75,10 @@
     return modelsReady;
   }
 
-  const detector = () => new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 }); // still photos: accurate
-  const liveDetector = () => new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }); // video: fast, so a blink is not missed
+  const detector = () => new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
   const ear = (p) => (dist(p[1], p[5]) + dist(p[2], p[4])) / (2 * dist(p[0], p[3])); // eye aspect ratio: drops when the eye closes
   const eyeOpenness = (lm) => { const p = lm.positions; return (ear(p.slice(36, 42)) + ear(p.slice(42, 48))) / 2; };
-  // Second blink signal that does not depend on the landmark shape: the contrast (standard deviation of brightness)
-  // inside each eye box. An open eye (dark iris, white sclera) is high contrast; an eyelid over it is flat skin.
-  // It is cheap, so it is sampled ~60 times a second between the (slower) face detections: a real blink is only
-  // 100-150 ms long and would fall between detections otherwise.
-  const eyeCanvas = document.createElement('canvas');
-  eyeCanvas.width = 32; eyeCanvas.height = 12;
-  const eyeCtx = eyeCanvas.getContext('2d', { willReadFrequently: true });
-  function eyeBoxes(lm) {
-    const p = lm.positions;
-    return [p.slice(36, 42), p.slice(42, 48)].map((pts) => {
-      const xs = pts.map((q) => q.x), ys = pts.map((q) => q.y);
-      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
-      const padY = Math.max(1, (y1 - y0) * 0.25);
-      return { x: x0, y: y0 - padY, w: Math.max(2, x1 - x0), h: (y1 - y0) + 2 * padY };
-    });
-  }
-  function contrastIn(video, boxes) {
-    let total = 0;
-    for (const b of boxes) {
-      eyeCtx.drawImage(video, b.x, b.y, b.w, b.h, 0, 0, 32, 12);
-      const d = eyeCtx.getImageData(0, 0, 32, 12).data;
-      let sum = 0, sq = 0, n = 0;
-      for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; sum += l; sq += l * l; n++; }
-      total += Math.sqrt(Math.max(0, sq / n - (sum / n) ** 2));
-    }
-    return total / boxes.length;
-  }
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // Face descriptor (128 numbers) for the largest face in a JPEG blob, or null when there is no clear face.
@@ -117,10 +88,7 @@
     try {
       const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
       const found = await faceapi.detectAllFaces(img, detector()).withFaceLandmarks(true).withFaceDescriptors();
-      if (!found.length) return null;
-      const area = (f) => f.detection.box.width * f.detection.box.height;
-      found.sort((a, b) => area(b) - area(a));
-      if (found.length > 1 && area(found[1]) * 2 > area(found[0])) return null; // two people of similar size: ambiguous
+      if (found.length !== 1) return null; // none, or more than one person in the photo
       return Array.from(found[0].descriptor);
     } finally { URL.revokeObjectURL(url); }
   }
@@ -139,9 +107,9 @@
       cancel.textContent = L.cancel; status.textContent = L.loading;
       document.body.appendChild(dlg);
 
-      let stream, stopped = false, sampler;
+      let stream, stopped = false;
       const finish = (fn, v) => {
-        stopped = true; clearInterval(sampler);
+        stopped = true;
         if (stream) stream.getTracks().forEach((t) => t.stop());
         if (dlg.open) dlg.close();
         dlg.remove(); fn(v);
@@ -152,7 +120,7 @@
 
       try {
         await loadModels();
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
       } catch (e) {
         return finish(reject, new Error(e && e.name === 'NotAllowedError' ? L.camera : window.faceapi ? L.camera : L.engine));
       }
@@ -161,58 +129,40 @@
       await video.play().catch(() => {});
 
       const started = Date.now();
-      let boxes = null, boxesAt = 0, blinkSeen = false;
-      let peakC = 0, cClosed = false, cClosedAt = 0;   // blink state from the fast contrast sampler
-      let peak = 0, closed = false, closedAt = 0;      // blink state from the landmark shape (checked per detection)
-      const forget = () => { boxes = null; blinkSeen = false; peakC = 0; cClosed = false; peak = 0; closed = false; };
-
-      sampler = setInterval(() => {
-        if (stopped || !boxes || Date.now() - boxesAt > 1500 || !video.videoWidth) return;
-        const c = contrastIn(video, boxes), now = Date.now();
-        if (!cClosed) {
-          peakC = peakC ? Math.max(c, peakC * 0.995) : c; // slowly-fading peak = the "eyes open" reference
-          if (peakC > 4 && c < peakC * 0.88) { cClosed = true; cClosedAt = now; }
-        } else if (c > peakC * 0.94) {
-          cClosed = false;
-          if (now - cClosedAt >= 30) blinkSeen = true;
-        } else if (now - cClosedAt > 2500) { cClosed = false; peakC = c; } // stuck reading: start over
-      }, 16);
-
+      let openLevel = 0, closed = false;
       while (!stopped) {
         if (Date.now() - started > TIMEOUT_MS) return finish(reject, new Error(L.timeout));
         if (!video.videoWidth) { await wait(100); continue; }
         let faces;
-        try { faces = await faceapi.detectAllFaces(video, liveDetector()).withFaceLandmarks(true); }
+        try { faces = await faceapi.detectAllFaces(video, detector()).withFaceLandmarks(true); }
         catch (e) { return finish(reject, new Error(L.engine)); }
         if (stopped) return;
-        if (faces.length === 0) { status.textContent = L.noFace; forget(); await wait(100); continue; }
-        if (faces.length > 1) { status.textContent = L.manyFaces; forget(); await wait(100); continue; }
+        if (faces.length === 0) { status.textContent = L.noFace; closed = false; await wait(120); continue; }
+        if (faces.length > 1) { status.textContent = L.manyFaces; closed = false; await wait(120); continue; }
         const f = faces[0];
-        // Face size is judged against the shorter side of the picture, so a wide laptop webcam works like a phone.
-        if (f.detection.box.width < Math.min(video.videoWidth, video.videoHeight) * 0.2) { status.textContent = L.closer; forget(); await wait(100); continue; }
+        if (f.detection.box.width < video.videoWidth * 0.25) { status.textContent = L.closer; closed = false; await wait(120); continue; }
 
-        boxes = eyeBoxes(f.landmarks); boxesAt = Date.now();
-        const shape = eyeOpenness(f.landmarks);
+        const open = eyeOpenness(f.landmarks);
         if (!closed) {
-          peak = peak ? Math.max(shape, peak * 0.99) : shape;
-          if (shape < peak * 0.82) { closed = true; closedAt = Date.now(); }
-        } else if (shape > peak * 0.92) { closed = false; blinkSeen = true; }
-        else if (Date.now() - closedAt > 2500) { closed = false; peak = shape; }
-
-        if (!blinkSeen) { status.textContent = Date.now() - started > 8000 ? L.blinkHelp : L.blink; await wait(10); continue; }
-        // A blink was seen: take the descriptor and the selfie now.
-        blinkSeen = false;
-        status.textContent = L.checking;
-        const full = await faceapi.detectSingleFace(video, detector()).withFaceLandmarks(true).withFaceDescriptor();
-        if (stopped) return;
-        if (!full) { status.textContent = L.noFace; forget(); continue; }
-        const scale = Math.min(1, 640 / video.videoWidth);
-        const c = document.createElement('canvas');
-        c.width = Math.round(video.videoWidth * scale);
-        c.height = Math.round(video.videoHeight * scale);
-        c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
-        const descriptor = Array.from(full.descriptor);
-        return c.toBlob((blob) => finish(resolve, { blob, descriptor }), 'image/jpeg', 0.7);
+          openLevel = openLevel ? Math.max(open, openLevel * 0.98) : open; // slowly-fading peak = "eyes open" reference
+          if (open < openLevel * 0.72) closed = true;
+          else status.textContent = L.blink;
+        } else if (open > openLevel * 0.88) {
+          // Eyes re-opened: that was a blink. Take the descriptor and the selfie from this frame.
+          closed = false;
+          status.textContent = L.checking;
+          const full = await faceapi.detectSingleFace(video, detector()).withFaceLandmarks(true).withFaceDescriptor();
+          if (stopped) return;
+          if (!full) { status.textContent = L.noFace; continue; }
+          const scale = Math.min(1, 640 / video.videoWidth);
+          const c = document.createElement('canvas');
+          c.width = Math.round(video.videoWidth * scale);
+          c.height = Math.round(video.videoHeight * scale);
+          c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+          const descriptor = Array.from(full.descriptor);
+          return c.toBlob((blob) => finish(resolve, { blob, descriptor }), 'image/jpeg', 0.7);
+        }
+        await wait(60);
       }
     });
   }

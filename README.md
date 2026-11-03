@@ -20,9 +20,11 @@ the `api` **Edge Function** for anything that must be checked on the server.
 
 ## What it does
 
-- Employees sign in with a **username and password** (no email), check in/out **only inside the office radius
-  (default 10 m)** with GPS accurate to 15 m or better, and take a live selfie each time.
-- The admin adds employees (name, username, password, **photo taken by the admin**), resets devices, disables or
+- Employees **do not log in**. They scan their face (live camera, blink once to prove it is a real person) and the
+  server finds who they are by matching against the photo the admin enrolled. They check in/out **only inside the
+  office radius (default 10 m)** with GPS accurate to 15 m or better; every check-in/out/visit is a fresh face scan
+  and the selfie is stored. After a scan they can see history and apply for leave for 20 minutes.
+- The admin adds employees (name, username, **photo taken by the admin**: the face is read from it), resets devices, disables or
   deletes employees, approves out-duty/customer visits and leave (full day, first half, second half), sees a
   dashboard with charts and late/absent lists, exports CSV, and edits the office location and rules.
 - Admin sign-in = username + password + **authenticator-app code**. This is enforced by the database and the
@@ -124,7 +126,10 @@ leave, approvals, delete. GitHub Actions runs them on every push.
 
 ## Known limits
 
-- With no face matching, someone else could take the selfie, so admins should review the photos on the dashboard.
+- Face matching uses face-api.js in the browser (blink check + face descriptor) and the server does the matching.
+  The blink check runs on the phone, so a determined attacker with a modified browser and a photo of a colleague
+  could bypass it; keep reviewing the stored selfies on the dashboard. Existing employees must have their photo
+  re-taken (Employees > Re-take photo) before they can use face sign-in.
   A website cannot detect fake-GPS apps; the device lock and the GPS accuracy rule reduce the risk.
 - Login sessions are kept in the browser's storage (Supabase's standard), not in cookies.
 - Supabase's built-in rate limits protect sign-in; there is no custom "lock after 5 wrong passwords".

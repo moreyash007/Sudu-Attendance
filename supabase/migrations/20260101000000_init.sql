@@ -18,7 +18,8 @@ create table if not exists public.profiles (
   active      boolean not null default true,
   device_id   text,
   enrol_photo text,
-  created_at  timestamptz not null default now()
+  face_descriptor jsonb,
+  created_at timestamptz not null default now()
 );
 create unique index if not exists profiles_username_key on public.profiles (lower(username));
 

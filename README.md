@@ -121,7 +121,7 @@ npx supabase start
 npx supabase status -o env      # shows API_URL, ANON_KEY, SERVICE_ROLE_KEY
 API_URL=... ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 ```
-113 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
+133 checks: admin sign-in, authenticator step, face sign-in, security rules, photo storage, the 10 m rules (both modes), device lock,
 leave, approvals, delete. GitHub Actions runs them on every push.
 
 ## Known limits

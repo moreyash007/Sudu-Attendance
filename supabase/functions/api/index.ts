@@ -223,7 +223,12 @@ async function checkIn(c: Ctx) {
 
 async function checkOut(c: Ctx) {
   requireEmployee(c.auth);
-  const { loc, photo } = await prepare(c, { inside: true });
+  // An employee who logged an out duty / customer visit / custom visit today (not rejected) may check out from
+  // anywhere; everyone else must be inside the office zone.
+  const { count } = await db.from('visits').select('id', { count: 'exact', head: true })
+    .eq('user_id', c.auth.userId).eq('date', dateKey()).neq('status', 'rejected');
+  const onVisit = (count ?? 0) > 0;
+  const { loc, photo } = await prepare(c, onVisit ? { inside: false, maxAccuracy: 100 } : { inside: true });
   const { data, error } = await db.from('attendance')
     .update({ out_time: new Date().toISOString(), out_lat: loc.lat, out_lng: loc.lng, out_acc: loc.acc, out_dist: loc.dist, out_photo: photo })
     .eq('user_id', c.auth.userId).eq('date', dateKey()).is('out_time', null).select('id');

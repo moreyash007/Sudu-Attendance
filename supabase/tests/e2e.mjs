@@ -1,4 +1,4 @@
-// End-to-end test of the Supabase backend: sign-in, authenticator step, security rules, photo storage and the
+// End-to-end test of the Supabase backend: sign-in, security rules, photo storage and the
 // `api` Edge Function. Needs Node 20+ and no packages. Run it with scripts/test.ps1 (or see the README).
 //   API_URL=http://127.0.0.1:55321 ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 import crypto from 'node:crypto';
@@ -23,18 +23,6 @@ nodeHttp.createServer((req, res) => {
 const results = [];
 const check = (name, ok, extra = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  <- ' + extra}`); };
 const short = (v) => JSON.stringify(v)?.slice(0, 160);
-
-// ---- tiny TOTP (RFC 6238) so no packages are needed ----
-function totp(secretBase32) {
-  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  let bits = '';
-  for (const ch of secretBase32.replace(/=+$/, '').toUpperCase()) bits += A.indexOf(ch).toString(2).padStart(5, '0');
-  const key = Buffer.from(bits.match(/.{8}/g).map((b) => parseInt(b, 2)));
-  const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
-  const h = crypto.createHmac('sha1', key).update(counter).digest();
-  const o = h[h.length - 1] & 0xf;
-  return String(((h[o] & 0x7f) << 24 | h[o + 1] << 16 | h[o + 2] << 8 | h[o + 3]) % 1e6).padStart(6, '0');
-}
 
 async function http(method, path, { token, body, key = ANON_KEY, headers = {}, raw } = {}) {
   const h = { apikey: key, ...headers };
@@ -80,28 +68,13 @@ async function selfie(token, uid) {
   r = await admin('POST', '/rest/v1/profiles', { id: adminId, username: UA, name: 'Admin', emp_id: 'ADMIN', role: 'admin' });
   check('first admin profile created', r.status === 201, short(r.data));
 
-  // ---------- admin: password only is NOT enough ----------
+  // ---------- admin sign-in (username + password) ----------
   r = await login(UA, 'wrong-password-1');
   check('wrong password is rejected', r.status === 400);
   r = await login(UA, 'AdminPass-12345');
   check('admin password sign-in works', r.status === 200 && r.data.access_token, short(r.data));
-  let aal1 = r.data.access_token;
-  check('password-only admin session is NOT treated as admin by the function', (await fn(aal1, 'admin-settings', { lat: 1, lng: 1, radius: 10, maxAccuracy: 15, graceMin: 5, startTime: '09:30' })).status === 403);
-  check('password-only admin sees only their own profile row', (await rest(aal1, 'GET', 'profiles?select=id')).data.length === 1);
-
-  // ---------- authenticator enrolment ----------
-  r = await http('POST', '/auth/v1/factors', { token: aal1, body: { factor_type: 'totp', friendly_name: 'Test ' + Date.now() } });
-  check('authenticator enrolment starts (QR + secret)', r.status === 200 && r.data.totp && r.data.totp.secret && r.data.totp.qr_code, short(r.data));
-  const factor = r.data.id, secret = r.data.totp.secret;
-  r = await http('POST', `/auth/v1/factors/${factor}/challenge`, { token: aal1, body: {} });
-  const challenge = r.data.id;
-  r = await http('POST', `/auth/v1/factors/${factor}/verify`, { token: aal1, body: { challenge_id: challenge, code: '000000' } });
-  check('wrong authenticator code is rejected', r.status >= 400);
-  r = await http('POST', `/auth/v1/factors/${factor}/challenge`, { token: aal1, body: {} });
-  r = await http('POST', `/auth/v1/factors/${factor}/verify`, { token: aal1, body: { challenge_id: r.data.id, code: totp(secret) } });
-  check('correct code upgrades the session to aal2', r.status === 200 && r.data.access_token, short(r.data));
   const A = r.data.access_token;
-  check('admin (aal2) sees all profiles', (await rest(A, 'GET', 'profiles?select=id')).status === 200);
+  check('admin sees all profiles', (await rest(A, 'GET', 'profiles?select=id')).status === 200);
 
   // ---------- admin creates employees ----------
   const b64 = JPEG.toString('base64');
@@ -112,7 +85,6 @@ async function selfie(token, uid) {
   check('employee needs a photo', (await mk('emp9', { photo: undefined })).status === 400);
   check('short password rejected', (await mk('emp8', { password: 'short' })).status === 400);
   check('bad username rejected', (await mk('Bad Name!')).status === 400);
-  check('a password-only admin session cannot create employees', (await fn(aal1, 'admin-create-user', { name: 'x', username: 'sneaky', password: 'Employee-Pass-1', photo: b64 })).status === 403);
   r = await mk(U2); const emp2 = r.data.id;
   check('admin creates employee emp2', r.status === 200);
 

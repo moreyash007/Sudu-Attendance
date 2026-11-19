@@ -47,4 +47,4 @@ try {
   exit 1
 }
 
-Write-Host "Done. Admin '$username' created. Sign in at the site's /admin/ page; the first sign-in sets up the authenticator app."
+Write-Host "Done. Admin '$username' created. Sign in at the site's /admin/ page with this username and password."

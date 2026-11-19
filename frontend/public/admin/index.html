@@ -17,18 +17,6 @@
     <input id="password" type="password" placeholder="Password" autocomplete="current-password">
     <button class="primary" id="loginBtn">Continue</button>
   </div>
-  <div id="step2" class="hidden">
-    <p class="muted">Open your authenticator app and enter the 6-digit code.</p>
-    <input id="mfaCode" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code">
-    <button class="primary" id="mfaBtn">Verify</button>
-  </div>
-  <div id="enroll" class="hidden">
-    <p class="muted">First sign-in: set up two-step verification. Scan this QR code with Google Authenticator or Microsoft Authenticator.</p>
-    <div id="qr" class="qr"></div>
-    <p class="muted">Or type this key: <code id="secretKey"></code></p>
-    <input id="enrollCode" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="off">
-    <button class="primary" id="enrollBtn">Turn on two-step verification</button>
-  </div>
   <div id="msg" class="err" role="alert"></div>
   <div class="tools" style="justify-content:center"><button id="themeBtn1" type="button">&#9680; Theme</button></div>
 </div>
@@ -75,7 +63,7 @@ const TYPE_LABEL = { out_duty: 'Out duty', customer_visit: 'Customer visit', cus
 const LEAVE_LABEL = { full: 'Full day', half_first: 'Half day (1st half)', half_second: 'Half day (2nd half)' };
 
 const setMsg = (m) => ($('msg').textContent = m || '');
-const showStep = (id) => ['step1', 'step2', 'enroll'].forEach((s) => $(s).classList.toggle('hidden', s !== id));
+const showStep = (id) => ['step1'].forEach((s) => $(s).classList.toggle('hidden', s !== id));
 $('themeBtn').onclick = $('themeBtn1').onclick = () => window.toggleTheme();
 
 // ---------- sign-in: password, then the authenticator code ----------
@@ -90,35 +78,7 @@ async function afterPassword(userId) {
   if (!prof || !prof.active || prof.role !== 'admin') {
     await sb.auth.signOut(); showLoginBox('step1'); return setMsg('This account is not an admin.');
   }
-  const { data: aal } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
-  if (aal.currentLevel === 'aal2') return enter();
-
-  const { data: factors } = await sb.auth.mfa.listFactors();
-  const verified = (factors.totp || [])[0];
-  if (verified) { factorId = verified.id; showLoginBox('step2'); $('mfaCode').focus(); return; }
-
-  // First sign-in: set up the authenticator app. Remove any half-finished earlier attempt first.
-  for (const f of (factors.all || []).filter((x) => x.factor_type === 'totp' && x.status !== 'verified')) {
-    await sb.auth.mfa.unenroll({ factorId: f.id });
-  }
-  const { data, error } = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Authenticator ' + Date.now() });
-  if (error) { showLoginBox('step1'); return setMsg('Could not start two-step setup: ' + error.message); }
-  factorId = data.id;
-  $('qr').innerHTML = ''; const img = new Image(); img.src = data.totp.qr_code; img.alt = 'QR code'; img.width = 200; $('qr').appendChild(img);
-  $('secretKey').textContent = data.totp.secret;
-  showLoginBox('enroll'); $('enrollCode').focus();
-}
-
-async function verifyCode(inputId) {
-  setMsg('');
-  try {
-    const { data: ch, error: e1 } = await sb.auth.mfa.challenge({ factorId });
-    if (e1) throw e1;
-    const { error: e2 } = await sb.auth.mfa.verify({ factorId, challengeId: ch.id, code: $(inputId).value.trim() });
-    if (e2) throw e2;
-    $(inputId).value = '';
-    await enter();
-  } catch (e) { setMsg('Invalid code. Try again.'); }
+  return enter();
 }
 
 $('loginBtn').onclick = async () => {
@@ -131,10 +91,6 @@ $('loginBtn').onclick = async () => {
   try { await afterPassword(data.user.id); } catch (e) { setMsg(e.message); }
 };
 $('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
-$('mfaBtn').onclick = () => verifyCode('mfaCode');
-$('enrollBtn').onclick = () => verifyCode('enrollCode');
-$('mfaCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('mfaBtn').click(); });
-$('enrollCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('enrollBtn').click(); });
 $('logout').onclick = async () => { await sb.auth.signOut(); location.reload(); };
 
 // ---------- shared UI ----------

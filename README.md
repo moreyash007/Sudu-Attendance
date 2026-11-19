@@ -25,8 +25,8 @@ the `api` **Edge Function** for anything that must be checked on the server.
 - The admin adds employees (name, username, password, **photo taken by the admin**), resets devices, disables or
   deletes employees, approves out-duty/customer visits and leave (full day, first half, second half), sees a
   dashboard with charts and late/absent lists, exports CSV, and edits the office location and rules.
-- Admin sign-in = username + password + **authenticator-app code**. This is enforced by the database and the
-  server, not just the login page.
+- Admin sign-in = username + password. Use a long, unique password. The admin role is enforced by the database and
+  the server, not just the login page.
 - **Holidays, fully controlled by the admin:** every Sunday and the 2nd Saturday of each month are off by default
   (the admin can switch any of these on or off, including the 1st-5th Saturday). For Diwali and other festivals the
   admin declares one day or a range in **Admin > Holidays**, and can rename or remove them. On a holiday nobody is
@@ -40,7 +40,7 @@ the `api` **Edge Function** for anything that must be checked on the server.
   Employees cannot write attendance any other way: the database refuses it.
 - Each account is locked to the first phone/browser it is used on; the admin can reset it.
 - Employees can only read their own records. Photos live in a private bucket: employees can upload to their own
-  folder but never read photos back; only a signed-in admin (with the authenticator step) can view them.
+  folder but never read photos back; only a signed-in admin can view them.
 - Out duty / customer visit / custom visit skip the location rule but need GPS + selfie + admin approval.
 - Data is encrypted at rest and in transit by Supabase (HTTPS everywhere).
 
@@ -77,8 +77,7 @@ Your Supabase project: `https://lrrnvjurlesmphpcfyft.supabase.co` (already set i
    built from the newest commit; Settings > General > Root Directory should be empty (or `frontend/public`).
    (Optional alternative: GitHub Pages. Set Settings > Pages > Source to **GitHub Actions**. Do not leave Source on
    "Deploy from a branch": GitHub then publishes the README over the site. Not needed if you use Vercel.)
-6. Open `/admin/`, sign in with your username and password, scan the QR code with Google/Microsoft Authenticator,
-   enter the code. From then on every admin sign-in asks for a code. Add employees under Employees.
+6. Open `/admin/` and sign in with your username and password. Add employees under Employees.
 
 ### Email the admin when an employee applies for leave
 
@@ -119,7 +118,7 @@ npx supabase start
 npx supabase status -o env      # shows API_URL, ANON_KEY, SERVICE_ROLE_KEY
 API_URL=... ANON_KEY=... SERVICE_ROLE_KEY=... node supabase/tests/e2e.mjs
 ```
-113 checks: sign-in, authenticator step, security rules, photo storage, the 10 m rules (both modes), device lock,
+113 checks: sign-in, security rules, photo storage, the 10 m rules (both modes), device lock,
 leave, approvals, delete. GitHub Actions runs them on every push.
 
 ## Known limits

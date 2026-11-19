@@ -142,7 +142,6 @@ async function authenticate(req: Request): Promise<Auth> {
 
 function requireAdmin(a: Auth) {
   if (a.profile.role !== 'admin') fail(403, 'Admins only.');
-  if (a.aal !== 'aal2') fail(403, 'Two-step verification is required.');
 }
 const requireEmployee = (a: Auth) => { if (a.profile.role !== 'employee') fail(403, 'Employees only.'); };
 

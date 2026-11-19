@@ -19,8 +19,7 @@ Checked on the live system with a temporary employee (removed afterwards): 19 of
 
 ## Before Monday (about 15 minutes)
 
-1. **Admin authenticator.** Open the admin page, **sign out**, sign in again, scan the QR code with a new entry in
-   Google/Microsoft Authenticator, delete any old entry, type the 6-digit code.
+1. **Admin password.** Make sure the admin password is long and unique (admin sign-in is password only).
 2. **Test on a real phone at the office.** Stand at the entrance with GPS on and allow location and camera.
    Check in, check out. The map tag should say "In office zone". If staff are refused, raise **Allowed radius** or
    **Max GPS error** in Admin > Settings (and see the messages table below).
@@ -81,6 +80,6 @@ pages pick up the change within about 30 seconds. Records already saved keep the
 
 ## Things to keep safe
 
-- The admin password and the authenticator phone. If the phone is lost, ask for an authenticator reset.
+- The admin password.
 - The Supabase and Vercel logins, and the GitHub repository (it is public; never commit passwords or keys).
 - The project's **secret / service_role** key must never appear on the website or in Git.
